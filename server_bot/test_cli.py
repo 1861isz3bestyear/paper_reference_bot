@@ -21,7 +21,7 @@ def test_packages_share_config_and_isolate_runtime_files() -> None:
 
 
 def test_start_both_uses_the_same_config(monkeypatch, tmp_path: Path) -> None:
-    config_path = tmp_path / "server_bot_config.json"
+    config_path = tmp_path / "paper_bot_config.json"
     load = Mock()
     reference = Mock()
     live = Mock()

@@ -5,14 +5,14 @@
   "open_order_vwap_sigma": 1.0,
   "close_order_vwap_sigma": 2.0,
   "initial_capital": 10.0,
-  "minimum_order_size": 5.0,
   "stop_loss_pct": 0.4,
   "allow_immediate_reentry": true,
   "vwap_anchor_reset_weeks": 2,
   "anchor_before_strategy_start": true,
-  "anchor_before_days": 4,
+  "anchor_before_days": 7,
   "data_source": "MEXC REST",
-  "ticker": "VET_USDT",
+  "ticker": "SHIB_USDT",
   "reverse_ticker": false,
-  "open_position_side": "Both"
+  "open_position_side": "Both",
+  "minimum_order_size": 0.01
 }

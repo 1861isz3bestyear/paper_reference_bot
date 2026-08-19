@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PAPER_BOT_CONFIG_FILE = PROJECT_ROOT / "server_bot_config.json"
+PAPER_BOT_CONFIG_FILE = PROJECT_ROOT / "paper_bot_config.json"
 SUPPORTED_TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d"}
 SUPPORTED_DATA_SOURCES = {"Bybit REST", "MEXC REST"}
 SUPPORTED_TICKERS = {"BTC_USDT", "SHIB_USDT", "VET_USDT", "VED_USDT"}

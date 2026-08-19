@@ -1,6 +1,6 @@
 # Server Bot
 
-Runs two anchored VWAP paper bots from one repository and one `server_bot_config.json`:
+Runs two anchored VWAP paper bots from one repository and the exact `paper_bot_config.json` exported by the `anchored_vwam_backtest` calculator:
 
 - `reference_bot` is sourced from `anchored_vwam_backtest/paper_trading_bot`.
 - `live_paper_bot` is sourced from `anchored_vwam_paper_bot/live_paper_trading_bot`.
@@ -17,8 +17,8 @@ uv run pytest
 Copy and edit the shared configuration if needed:
 
 ```bash
-cp server_bot_config.example.json server_bot_config.json
-nvim server_bot_config.json
+cp paper_bot_config.example.json paper_bot_config.json
+nvim paper_bot_config.json
 ```
 
 ## Combined commands
@@ -38,8 +38,8 @@ Use `start --resume` to retain both launch anchors and processing cursors.
 For systemd, supervise each process directly rather than using the background `start` command:
 
 ```bash
-uv run python -m reference_bot.cli run --resume --config ./server_bot_config.json
-uv run python -m live_paper_bot.cli run --resume --config ./server_bot_config.json
+uv run python -m reference_bot.cli run --resume --config ./paper_bot_config.json
+uv run python -m live_paper_bot.cli run --resume --config ./paper_bot_config.json
 ```
 
 Create two systemd services with the same working directory and config path, one for each command above.
