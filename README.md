@@ -29,6 +29,7 @@ uv run python -m server_bot.cli status
 uv run python -m server_bot.cli stats
 uv run python -m server_bot.cli stop
 uv run python -m server_bot.cli reset
+uv run python -m server_bot.cli health-check
 ```
 
 Use `start --resume` to retain both launch anchors and processing cursors.
@@ -49,3 +50,13 @@ Create two systemd services with the same working directory and config path, one
 The reference bot writes `reference_*` files. The live-paper bot writes `live_paper_*` files. `reset` deletes both bots' runtime data but retains the shared configuration and logs.
 
 Neither bot submits real exchange orders. Bybit credentials are used only for the read-only fee-rate endpoint. MEXC uses public market and fee data.
+
+## Health command for external supervision
+
+`health-check` is read-only and contains no systemd or restart behavior. It compares both state files and returns:
+
+- exit `0`: reference is fewer than 10 candles behind live-paper;
+- exit `1`: live-paper is current but reference is at least 10 candles behind;
+- exit `2`: health is indeterminate because live-paper itself is stale or state is unavailable.
+
+Thresholds can be changed with `--stale-candles` and `--paper-grace-candles`. A systemd health service or timer can later use these exit codes to decide whether to restart the reference service.
