@@ -216,3 +216,20 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# Project credentials and runtime data
+bybitapi.env
+testnetapi.env
+
+reference_account.json*
+reference_state.json*
+reference_bot.pid
+reference_bot.log
+reference_bot.instance.lock
+reference_candles.sqlite*
+
+live_paper_account.json*
+live_paper_state.json*
+live_paper_bot.pid
+live_paper_bot.log
+live_paper_bot.instance.lock
+live_paper_candles.sqlite*
