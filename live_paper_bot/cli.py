@@ -50,6 +50,30 @@ INTERVAL_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h
 REST_RECONCILE_SECONDS = 30 * 60
 
 
+def _missing_candle_ranges(
+    candle_times_ms: pd.Series,
+    expected_first_ms: int,
+    expected_latest_ms: int,
+    interval_ms: int,
+) -> list[tuple[int, int]]:
+    """Return inclusive, contiguous ranges absent from the cached history."""
+    present = {int(value) for value in candle_times_ms}
+    ranges: list[tuple[int, int]] = []
+    range_start: int | None = None
+    previous = expected_first_ms
+    for timestamp in range(expected_first_ms, expected_latest_ms + 1, interval_ms):
+        if timestamp not in present:
+            if range_start is None:
+                range_start = timestamp
+        elif range_start is not None:
+            ranges.append((range_start, previous))
+            range_start = None
+        previous = timestamp
+    if range_start is not None:
+        ranges.append((range_start, expected_latest_ms))
+    return ranges
+
+
 @dataclass(frozen=True)
 class StrategyDecision:
     side: str | None
@@ -235,8 +259,39 @@ class PaperBot:
             first_ms = int(candle_times_ms.iloc[0]) if not cached.empty else -1
             latest_ms = int(candle_times_ms.iloc[-1]) if not cached.empty else -1
             incomplete = first_ms > expected_first_ms or latest_ms < expected_latest_ms or has_gap
+        # A broad paginated MEXC request can occasionally omit an interval. Ask
+        # for every absent range explicitly before allowing strategy evaluation.
+        if incomplete and self.config.data_source == "MEXC REST":
+            missing_ranges = _missing_candle_ranges(
+                candle_times_ms, expected_first_ms, expected_latest_ms, interval_ms
+            )
+            for missing_start_ms, missing_end_ms in missing_ranges:
+                downloaded = fetch_completed_mexc_klines(
+                    self.market_symbol,
+                    self.config.timeframe,
+                    missing_start_ms,
+                    missing_end_ms + interval_ms,
+                )
+                self.candle_cache.upsert(self.market_symbol, self.config.timeframe, downloaded)
+            cached = self.candle_cache.load(self.market_symbol, self.config.timeframe, start_ms, end_ms)
+            candle_times_ms = cached["time"].astype("int64") // 1_000_000
+            missing_ranges = _missing_candle_ranges(
+                candle_times_ms, expected_first_ms, expected_latest_ms, interval_ms
+            )
+            incomplete = bool(missing_ranges)
         if incomplete:
-            raise RuntimeError(f"{self.config.data_source} candle history is incomplete; refusing to calculate or advance the cursor.")
+            detail = ""
+            if self.config.data_source == "MEXC REST" and missing_ranges:
+                missing_start_ms, missing_end_ms = missing_ranges[0]
+                detail = (
+                    f" First missing range: "
+                    f"{pd.to_datetime(missing_start_ms, unit='ms', utc=True).isoformat()} through "
+                    f"{pd.to_datetime(missing_end_ms, unit='ms', utc=True).isoformat()}."
+                )
+            raise RuntimeError(
+                f"{self.config.data_source} candle history is incomplete after targeted backfill; "
+                f"refusing to calculate or advance the cursor.{detail}"
+            )
 
         if download_succeeded:
             self.state.last_successful_market_sync = datetime.now(timezone.utc).isoformat()

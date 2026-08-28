@@ -13,6 +13,7 @@ from reference_bot.cli import (
     BotState,
     PaperBot,
     StrategyDecision,
+    _missing_candle_ranges,
     calculate_strategy_decision,
     calculate_target_side,
     process_is_running,
@@ -45,6 +46,15 @@ def candles() -> pd.DataFrame:
             "number_of_trades": [0, 0],
         }
     )
+
+
+def test_missing_candle_ranges_groups_adjacent_intervals() -> None:
+    times = pd.Series([0, 60_000, 240_000, 360_000])
+
+    assert _missing_candle_ranges(times, 0, 360_000, 60_000) == [
+        (120_000, 180_000),
+        (300_000, 300_000),
+    ]
 
 
 class TestPaperBot:
