@@ -1,0 +1,25 @@
+[project]
+name = "server-bot"
+version = "0.1.0"
+description = "Reference and live-paper anchored VWAP bots sharing one configuration"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.0.0",
+    "pandas>=2.2.0",
+    "requests>=2.32.0",
+    "websockets>=14.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-cov>=6.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["reference_bot", "live_paper_bot", "server_bot"]
+python_files = ["test_*.py"]
+
+[tool.coverage.run]
+omit = ["*/test_*.py"]
