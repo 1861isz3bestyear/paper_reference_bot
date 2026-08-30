@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pandas as pd
 import pytest
 from real_bot import cli
-from real_bot.client import MEXCFuturesClient
+from real_bot.client import MEXCError, MEXCFuturesClient
 
 def config() -> Mock:
     return Mock(data_source="MEXC REST", reverse_ticker=False, strategy_mode="VWAP band mean reversion", trend=True,
@@ -26,12 +26,13 @@ def test_waits_between_bands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     instance, client = bot(monkeypatch, tmp_path); assert instance.reconcile_once(180) is None
     client.submit_market_order.assert_not_called()
 
-def test_crossing_submits_one_market_entry_with_sltp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_crossing_submits_one_market_entry_and_persists_sltp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     instance, client = bot(monkeypatch, tmp_path); client.last_price.return_value = Decimal("0.000011")
-    assert "attached SL/TP" in instance.reconcile_once(180)
+    assert "awaiting fill" in instance.reconcile_once(180)
     call = client.submit_market_order.call_args.kwargs
-    assert call["side"] == 1 and call["stop_loss_price"] == Decimal("0.000010956")
-    assert call["take_profit_price"] == Decimal("0.000012") and instance.state.entry_submission["side"] == "Long"
+    assert call["side"] == 1 and "stop_loss_price" not in call and "take_profit_price" not in call
+    assert instance.state.entry_submission["stop_loss"] == "0.000010956"
+    assert instance.state.entry_submission["take_profit"] == "0.000012"
 
 def test_fill_installs_protection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     instance, client = bot(monkeypatch, tmp_path)
@@ -67,3 +68,17 @@ def test_uncertain_entry_outcome_halts_without_resubmitting(monkeypatch: pytest.
     with pytest.raises(RuntimeError, match="uncertain"): instance.reconcile_once(180)
     client.submit_market_order.assert_not_called()
     assert "uncertain" in instance.state.halted_reason
+
+def test_structured_entry_rejection_halts_without_uncertain_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    instance, client = bot(monkeypatch, tmp_path); client.last_price.return_value = Decimal("0.000011")
+    client.submit_market_order.side_effect = MEXCError("MEXC POST /order API error: rejected")
+    with pytest.raises(MEXCError, match="rejected"): instance.reconcile_once(180)
+    assert instance.state.entry_submission is None
+    assert "market entry rejected" in instance.state.halted_reason
+
+def test_transport_failure_keeps_submission_for_reconciliation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    instance, client = bot(monkeypatch, tmp_path); client.last_price.return_value = Decimal("0.000011")
+    client.submit_market_order.side_effect = MEXCError("MEXC request failed: timed out")
+    with pytest.raises(MEXCError, match="timed out"): instance.reconcile_once(180)
+    assert instance.state.entry_submission["side"] == "Long"
+    assert instance.state.halted_reason is None

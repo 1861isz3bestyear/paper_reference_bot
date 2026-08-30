@@ -77,14 +77,15 @@ After each completed candle the executor performs these operations in order:
 
 1. Recalculate AVWAP and sigma bands.
 2. Monitor MEXC's live last price locally.
-3. At `open_sigma_1`, submit one Long market entry with attached SL/TP.
-4. At `open_sigma_2`, submit one Short market entry with attached SL/TP.
+3. At `open_sigma_1`, submit one Long market entry.
+4. At `open_sigma_2`, submit one Short market entry.
 
 The example config uses `+1σ → +2σ` and `-1σ → -2σ`. MEXC rejects private plan-order
 placement for this account, so crossover detection runs in the executor. Only the side
-that crosses is submitted; there is no resting sibling order. Submission intent and its
-protection plan are persisted before the API call for timeout/crash recovery. After the
-fill, the executor confirms protection through MEXC's stop-order endpoint. If protection
+that crosses is submitted; there is no resting sibling order. MEXC rejects SL/TP attached
+to these market entries, so submission intent and its protection plan are persisted before
+the API call for timeout/crash recovery. Immediately after the fill appears, the executor
+installs protection through MEXC's stop-order endpoint. If protection
 cannot be confirmed, it submits an emergency market close and permanently halts new
 entries until an operator clears the state after inspecting the account.
 

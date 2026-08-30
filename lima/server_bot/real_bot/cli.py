@@ -233,13 +233,21 @@ class RealBot:
         plan["submitted_at"] = datetime.now(timezone.utc).isoformat()
         self.state.entry_submission = plan
         self.state.save()
-        self.client.submit_market_order(
-            symbol=self.symbol, side=1 if side == "Long" else 3, volume=int(plan["volume"]),
-            leverage=self.leverage, open_type=self.open_type,
-            external_oid=f"avwap-{side.lower()}-{int(time.time())}",
-            stop_loss_price=Decimal(plan["stop_loss"]), take_profit_price=Decimal(plan["take_profit"]),
-        )
-        return f"{side} market entry submitted with attached SL/TP; awaiting position confirmation"
+        try:
+            self.client.submit_market_order(
+                symbol=self.symbol, side=1 if side == "Long" else 3, volume=int(plan["volume"]),
+                leverage=self.leverage, open_type=self.open_type,
+                external_oid=f"avwap-{side.lower()}-{int(time.time())}",
+            )
+        except MEXCError as exc:
+            # A structured exchange rejection means no order was accepted. Transport
+            # failures remain uncertain because the exchange may have received it.
+            if " API error:" in str(exc):
+                self.state.entry_submission = None
+                self.state.halted_reason = f"market entry rejected: {exc}"
+                self.state.save()
+            raise
+        return f"{side} market entry submitted; awaiting fill before immediate SL/TP installation"
 
     def run(self, *, poll_seconds: int, max_age_seconds: int, order_lifetime_minutes: int) -> None:
         signal.signal(signal.SIGTERM, self.stop); signal.signal(signal.SIGINT, self.stop)
