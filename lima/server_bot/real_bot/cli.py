@@ -29,6 +29,7 @@ class RealState:
     orders_placed_at: str | None = None
     protections: dict[str, dict[str, str]] | None = None
     protected_position_id: str | None = None
+    side_protections: dict[str, dict[str, str]] | None = None
 
     @classmethod
     def load(cls) -> "RealState":
@@ -40,6 +41,7 @@ class RealState:
             raise RuntimeError(f"Cannot read {STATE_FILE.name}: {exc}") from None
         state.order_ids = state.order_ids or []
         state.protections = state.protections or {}
+        state.side_protections = state.side_protections or {}
         return state
 
     def save(self) -> None:
@@ -125,6 +127,7 @@ class RealBot:
         if ids: self.client.cancel_orders(self.symbol, ids)
         self.state.order_ids, self.state.orders_placed_candle, self.state.orders_placed_at = [], None, None
         self.state.protections = {}
+        self.state.side_protections = {}
         self.state.save()
 
     @staticmethod
@@ -134,7 +137,9 @@ class RealBot:
     def _sizing(self, entries: tuple[Decimal, Decimal]) -> tuple[int, Decimal, Decimal]:
         detail = self.client.contract(self.symbol)
         size, tick = Decimal(str(detail["contractSize"])), Decimal(str(detail["priceUnit"]))
-        allocation = min(Decimal(str(self.config.initial_capital)), self.client.available_usdt())
+        available_margin = self.client.available_usdt()
+        pair_safe_notional = available_margin * Decimal("0.98") * Decimal(self.leverage) / 2
+        allocation = min(Decimal(str(self.config.initial_capital)), pair_safe_notional)
         required = max(MINIMUM_NOTIONAL, Decimal(str(self.config.minimum_order_size)))
         if allocation < required: raise RuntimeError(f"allocation {allocation} USDT is below {required} USDT")
         volume = int((allocation / (max(entries) * size)).to_integral_value(rounding=ROUND_DOWN))
@@ -155,16 +160,19 @@ class RealBot:
             position_id = str(raw_position_id)
             side = "Long" if int(position.get("positionType", 0)) == 1 else "Short" if int(position.get("positionType", 0)) == 2 else None
             if side is None: raise RuntimeError("MEXC position has an unknown side; cannot install protection")
-            sibling_ids = [value for value in (self.state.order_ids or []) if value in open_ids]
-            if sibling_ids: self.client.cancel_orders(self.symbol, sibling_ids)
             if self.state.protected_position_id != position_id:
-                plans = self.state.protections or {}
-                plan = next((value for value in plans.values() if value.get("side") == side), None)
+                plan = (self.state.side_protections or {}).get(side)
+                if plan is None:
+                    plans = self.state.protections or {}
+                    plan = next((value for value in plans.values() if value.get("side") == side), None)
                 if not plan: raise RuntimeError(f"no saved SL/TP plan for filled {side} position")
+                # Protect the live position before attempting sibling cancellation.
                 self.client.set_position_stop_loss(raw_position_id, Decimal(plan["stop_loss"]))
                 self.client.set_position_take_profit(raw_position_id, Decimal(plan["take_profit"]))
+                sibling_ids = [value for value in (self.state.order_ids or []) if value in open_ids]
+                if sibling_ids: self.client.cancel_orders(self.symbol, sibling_ids)
                 self.state.protected_position_id = position_id
-                self.state.order_ids, self.state.protections = [], {}
+                self.state.order_ids, self.state.protections, self.state.side_protections = [], {}, {}
                 self.state.orders_placed_candle, self.state.orders_placed_at = None, None
                 self.state.save()
                 return f"fill detected; sibling canceled and {side} SL/TP installed"
@@ -198,23 +206,41 @@ class RealBot:
         # Required ordering: calculate successfully, cancel the old pair, then submit both replacements.
         if self.state.order_ids: self._cancel_tracked(open_ids)
         stamp = int(latest.timestamp())
+        self.state.side_protections = {
+            "Long": {"side": "Long", "stop_loss": format(stop1, "f"), "take_profit": format(exit1, "f")},  # type: ignore[arg-type]
+            "Short": {"side": "Short", "stop_loss": format(stop2, "f"), "take_profit": format(exit2, "f")},  # type: ignore[arg-type]
+        }
+        self.state.order_ids, self.state.protections = [], {}
+        self.state.orders_placed_candle = latest.isoformat()
+        self.state.orders_placed_at = datetime.now(timezone.utc).isoformat()
+        self.state.save()
         first = response_order_id(self.client.submit_limit_order(symbol=self.symbol, side=1, volume=volume, price=entry1,
             take_profit_price=None, stop_loss_price=None, leverage=self.leverage, open_type=self.open_type,
             external_oid=f"avwap-plus-{stamp}"))
+        self.state.order_ids = [first]
+        self.state.protections = {first: self.state.side_protections["Long"]}
+        self.state.save()
         try:
             second = response_order_id(self.client.submit_limit_order(symbol=self.symbol, side=3, volume=volume, price=entry2,
                 take_profit_price=None, stop_loss_price=None, leverage=self.leverage, open_type=self.open_type,
                 external_oid=f"avwap-minus-{stamp}"))
-        except Exception:
-            self.client.cancel_orders(self.symbol, [first]); raise
+        except Exception as submit_error:
+            try:
+                self.client.cancel_orders(self.symbol, [first])
+            except Exception as cancel_error:
+                raise RuntimeError(
+                    f"second entry failed ({submit_error}); first entry cancellation failed ({cancel_error})"
+                ) from submit_error
+            self.state.order_ids, self.state.protections, self.state.side_protections = [], {}, {}
+            self.state.orders_placed_candle, self.state.orders_placed_at = None, None
+            self.state.save()
+            raise
         self.state.last_calculated_candle, self.state.order_ids = latest.isoformat(), [first, second]
         self.state.protections = {
-            first: {"side": "Long", "stop_loss": format(stop1, "f"), "take_profit": format(exit1, "f")},  # type: ignore[arg-type]
-            second: {"side": "Short", "stop_loss": format(stop2, "f"), "take_profit": format(exit2, "f")},  # type: ignore[arg-type]
+            first: self.state.side_protections["Long"],
+            second: self.state.side_protections["Short"],
         }
         self.state.protected_position_id = None
-        self.state.orders_placed_candle = latest.isoformat()
-        self.state.orders_placed_at = datetime.now(timezone.utc).isoformat()
         self.state.save()
         return f"placed refreshed +sigma/-sigma pair for {latest.isoformat()} ({volume} contracts each)"
 

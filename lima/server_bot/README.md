@@ -91,7 +91,9 @@ orders could fill; multiple positions cause all tracked entries to be canceled a
 executor to pause order placement.
 
 `initial_capital` is the maximum USDT notional per entry. Prices and volumes are rounded
-down to MEXC contract steps, and orders below `0.01 USDT` are rejected.
+down to MEXC contract steps, and orders below `0.01 USDT` are rejected. Because both
+entries reserve margin simultaneously, each leg is also capped at 49% of available margin
+(converted to notional using configured leverage), leaving 2% for fees and rounding.
 Each stop loss is calculated from the actual rounded order deposit (notional divided by
 configured leverage): the maximum modeled loss is `deposit × stop_loss_pct`. Each take
 profit is the corresponding `close_sigma` price.

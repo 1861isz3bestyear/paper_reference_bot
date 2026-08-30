@@ -82,7 +82,11 @@ class MEXCFuturesClient:
         if not order_ids:
             return None
         return self._request("POST", "/api/v1/private/order/cancel", [
-            {"symbol": symbol, "orderId": order_id} for order_id in order_ids
+            {
+                "symbol": symbol,
+                "orderId": int(order_id) if str(order_id).isdigit() else order_id,
+            }
+            for order_id in order_ids
         ])
 
     def contract(self, symbol: str) -> dict[str, Any]:

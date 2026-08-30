@@ -97,3 +97,21 @@ def test_stop_prices_use_actual_deposit_and_leverage(monkeypatch: pytest.MonkeyP
     instance.reconcile_once(180)
     assert instance.state.protections["one"]["stop_loss"] == "0.000010978"
     assert instance.state.protections["two"]["stop_loss"] == "0.000009018"
+
+
+def test_sizing_reserves_half_available_margin_per_leg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    instance, client = bot(monkeypatch, tmp_path)
+    client.available_usdt.return_value = Decimal("9")
+    instance.reconcile_once(180)
+    volumes = [call.kwargs["volume"] for call in client.submit_limit_order.call_args_list]
+    assert volumes == [400, 400]
+
+
+def test_failed_submit_and_cancel_keeps_recovery_plan(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    instance, client = bot(monkeypatch, tmp_path)
+    client.submit_limit_order.side_effect = ["123", RuntimeError("insufficient")]
+    client.cancel_orders.side_effect = RuntimeError("parameter error")
+    with pytest.raises(RuntimeError, match="cancellation failed"):
+        instance.reconcile_once(180)
+    assert instance.state.order_ids == ["123"]
+    assert instance.state.side_protections["Long"]["take_profit"] == "0.000012"
