@@ -72,16 +72,21 @@ class MEXCFuturesClient:
         data = self._request("GET", "/api/v1/private/position/open_positions", {"symbol": symbol})
         return data if isinstance(data, list) else []
 
-    def open_orders(self, symbol: str) -> list[dict[str, Any]]:
-        data = self._request("GET", f"/api/v1/private/order/list/open_orders/{symbol}")
+    def open_plan_orders(self, symbol: str) -> list[dict[str, Any]]:
+        data = self._request("GET", "/api/v1/private/planorder/list/orders", {
+            "symbol": symbol,
+            "states": "1",
+            "page_num": 1,
+            "page_size": 100,
+        })
         if isinstance(data, dict):
             data = data.get("resultList", [])
         return data if isinstance(data, list) else []
 
-    def cancel_orders(self, symbol: str, order_ids: list[str]) -> Any:
+    def cancel_plan_orders(self, symbol: str, order_ids: list[str]) -> Any:
         if not order_ids:
             return None
-        return self._request("POST", "/api/v1/private/order/cancel", [
+        return self._request("POST", "/api/v1/private/planorder/cancel", [
             {
                 "symbol": symbol,
                 "orderId": int(order_id) if str(order_id).isdigit() else order_id,
@@ -116,46 +121,33 @@ class MEXCFuturesClient:
             "externalOid": external_oid,
         })
 
-    def submit_limit_order(
+    def submit_trigger_order(
         self,
         *,
         symbol: str,
         side: int,
         volume: int,
-        price: Decimal,
-        take_profit_price: Decimal | None,
-        stop_loss_price: Decimal | None,
+        trigger_price: Decimal,
+        take_profit_price: Decimal,
+        stop_loss_price: Decimal,
         leverage: int,
         open_type: int,
-        external_oid: str,
     ) -> Any:
         payload: dict[str, Any] = {
             "symbol": symbol,
-            "price": format(price, "f"),
             "vol": volume,
             "side": side,
-            "type": 1,
+            "type": 5,
             "openType": open_type,
             "leverage": leverage,
-            "externalOid": external_oid,
+            "triggerPrice": format(trigger_price, "f"),
+            "triggerType": 1 if side == 1 else 2,
+            "executeCycle": 1,
+            "trend": 1,
+            "takeProfitPrice": format(take_profit_price, "f"),
+            "stopLossPrice": format(stop_loss_price, "f"),
         }
-        if take_profit_price is not None:
-            payload["takeProfitPrice"] = format(take_profit_price, "f")
-        if stop_loss_price is not None:
-            payload["stopLossPrice"] = format(stop_loss_price, "f")
-        return self._request("POST", "/api/v1/private/order/submit", payload)
-
-    def set_position_stop_loss(self, position_id: Any, price: Decimal) -> Any:
-        return self._request("POST", "/api/v1/private/position/change_stop_loss_price", {
-            "positionId": position_id,
-            "stopLossPrice": format(price, "f"),
-        })
-
-    def set_position_take_profit(self, position_id: Any, price: Decimal) -> Any:
-        return self._request("POST", "/api/v1/private/position/change_take_profit_price", {
-            "positionId": position_id,
-            "takeProfitPrice": format(price, "f"),
-        })
+        return self._request("POST", "/api/v1/private/planorder/place", payload)
 
     def available_usdt(self) -> Decimal:
         asset = next((item for item in self.assets() if item.get("currency") == "USDT"), None)

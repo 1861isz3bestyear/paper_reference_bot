@@ -30,6 +30,7 @@ class RealState:
     protections: dict[str, dict[str, str]] | None = None
     protected_position_id: str | None = None
     side_protections: dict[str, dict[str, str]] | None = None
+    entry_transition_seen_at: str | None = None
 
     @classmethod
     def load(cls) -> "RealState":
@@ -124,8 +125,9 @@ class RealBot:
     def _cancel_tracked(self, open_ids: set[str] | None = None) -> None:
         tracked = self.state.order_ids or []
         ids = tracked if open_ids is None else [value for value in tracked if value in open_ids]
-        if ids: self.client.cancel_orders(self.symbol, ids)
+        if ids: self.client.cancel_plan_orders(self.symbol, ids)
         self.state.order_ids, self.state.orders_placed_candle, self.state.orders_placed_at = [], None, None
+        self.state.entry_transition_seen_at = None
         self.state.protections = {}
         self.state.side_protections = {}
         self.state.save()
@@ -149,7 +151,7 @@ class RealBot:
         return volume, tick, size
 
     def reconcile_once(self, max_age_seconds: int, order_lifetime_minutes: int = 10) -> str | None:
-        open_ids = {str(item.get("orderId")) for item in self.client.open_orders(self.symbol)}
+        open_ids = {str(item.get("orderId")) for item in self.client.open_plan_orders(self.symbol)}
         positions = [item for item in self.client.positions(self.symbol) if Decimal(str(item.get("holdVol", 0))) > 0]
         if len(positions) > 1:
             self._cancel_tracked(open_ids); raise RuntimeError("multiple positions found; entries canceled")
@@ -166,21 +168,31 @@ class RealBot:
                     plans = self.state.protections or {}
                     plan = next((value for value in plans.values() if value.get("side") == side), None)
                 if not plan: raise RuntimeError(f"no saved SL/TP plan for filled {side} position")
-                # Protect the live position before attempting sibling cancellation.
-                self.client.set_position_stop_loss(raw_position_id, Decimal(plan["stop_loss"]))
-                self.client.set_position_take_profit(raw_position_id, Decimal(plan["take_profit"]))
+                # Trigger entries carry exchange-side SL/TP. Once a fill exists,
+                # cancel its still-pending sibling and retain the position marker.
                 sibling_ids = [value for value in (self.state.order_ids or []) if value in open_ids]
-                if sibling_ids: self.client.cancel_orders(self.symbol, sibling_ids)
+                if sibling_ids: self.client.cancel_plan_orders(self.symbol, sibling_ids)
                 self.state.protected_position_id = position_id
                 self.state.order_ids, self.state.protections, self.state.side_protections = [], {}, {}
                 self.state.orders_placed_candle, self.state.orders_placed_at = None, None
+                self.state.entry_transition_seen_at = None
                 self.state.save()
-                return f"fill detected; sibling canceled and {side} SL/TP installed"
+                return f"fill detected; sibling canceled; {side} exchange-side SL/TP active"
             return None
         tracked = set(self.state.order_ids or [])
         if tracked - open_ids:
+            if open_ids & tracked:
+                self.client.cancel_plan_orders(self.symbol, sorted(open_ids & tracked))
+            now = datetime.now(timezone.utc)
+            if self.state.entry_transition_seen_at is None:
+                self.state.entry_transition_seen_at = now.isoformat()
+                self.state.save()
+                return "entry triggered; sibling canceled; waiting for position confirmation"
+            transition_at = datetime.fromisoformat(self.state.entry_transition_seen_at.replace("Z", "+00:00"))
+            if now - transition_at < timedelta(seconds=60):
+                return "waiting for triggered entry position confirmation"
             self._cancel_tracked(open_ids)
-            return "entry disappeared; canceled sibling and waiting for next candle"
+            return "trigger disappeared without a position; cleared pair after 60 seconds"
         if self.state.orders_placed_at:
             placed_at = datetime.fromisoformat(self.state.orders_placed_at.replace("Z", "+00:00"))
             if datetime.now(timezone.utc) - placed_at >= timedelta(minutes=order_lifetime_minutes):
@@ -205,7 +217,6 @@ class RealBot:
         stop2 = self._tick(entry2 + short_delta, tick) if loss_pct else None
         # Required ordering: calculate successfully, cancel the old pair, then submit both replacements.
         if self.state.order_ids: self._cancel_tracked(open_ids)
-        stamp = int(latest.timestamp())
         self.state.side_protections = {
             "Long": {"side": "Long", "stop_loss": format(stop1, "f"), "take_profit": format(exit1, "f")},  # type: ignore[arg-type]
             "Short": {"side": "Short", "stop_loss": format(stop2, "f"), "take_profit": format(exit2, "f")},  # type: ignore[arg-type]
@@ -213,20 +224,19 @@ class RealBot:
         self.state.order_ids, self.state.protections = [], {}
         self.state.orders_placed_candle = latest.isoformat()
         self.state.orders_placed_at = datetime.now(timezone.utc).isoformat()
+        self.state.entry_transition_seen_at = None
         self.state.save()
-        first = response_order_id(self.client.submit_limit_order(symbol=self.symbol, side=1, volume=volume, price=entry1,
-            take_profit_price=None, stop_loss_price=None, leverage=self.leverage, open_type=self.open_type,
-            external_oid=f"avwap-plus-{stamp}"))
+        first = response_order_id(self.client.submit_trigger_order(symbol=self.symbol, side=1, volume=volume, trigger_price=entry1,
+            take_profit_price=exit1, stop_loss_price=stop1, leverage=self.leverage, open_type=self.open_type))
         self.state.order_ids = [first]
         self.state.protections = {first: self.state.side_protections["Long"]}
         self.state.save()
         try:
-            second = response_order_id(self.client.submit_limit_order(symbol=self.symbol, side=3, volume=volume, price=entry2,
-                take_profit_price=None, stop_loss_price=None, leverage=self.leverage, open_type=self.open_type,
-                external_oid=f"avwap-minus-{stamp}"))
+            second = response_order_id(self.client.submit_trigger_order(symbol=self.symbol, side=3, volume=volume, trigger_price=entry2,
+                take_profit_price=exit2, stop_loss_price=stop2, leverage=self.leverage, open_type=self.open_type))
         except Exception as submit_error:
             try:
-                self.client.cancel_orders(self.symbol, [first])
+                self.client.cancel_plan_orders(self.symbol, [first])
             except Exception as cancel_error:
                 raise RuntimeError(
                     f"second entry failed ({submit_error}); first entry cancellation failed ({cancel_error})"
@@ -242,7 +252,7 @@ class RealBot:
         }
         self.state.protected_position_id = None
         self.state.save()
-        return f"placed refreshed +sigma/-sigma pair for {latest.isoformat()} ({volume} contracts each)"
+        return f"placed refreshed +sigma/-sigma trigger pair for {latest.isoformat()} ({volume} contracts each)"
 
     def run(self, *, poll_seconds: int, max_age_seconds: int, order_lifetime_minutes: int) -> None:
         signal.signal(signal.SIGTERM, self.stop); signal.signal(signal.SIGINT, self.stop)
@@ -273,7 +283,7 @@ def run_real_command(config_path: Path, env_path: Path, *, confirm_live: bool, p
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Trade refreshed MEXC AVWAP limit pairs")
+    parser = argparse.ArgumentParser(description="Trade refreshed MEXC AVWAP trigger pairs")
     parser.add_argument("run-real", choices=("run-real",)); parser.add_argument("--confirm-live", action="store_true")
     parser.add_argument("--config", type=Path, default=PAPER_BOT_CONFIG_FILE); parser.add_argument("--env", type=Path, default=ENV_FILE)
     parser.add_argument("--poll-seconds", type=int, default=10); parser.add_argument("--max-signal-age", type=int, default=180)

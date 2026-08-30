@@ -77,13 +77,14 @@ After each completed candle the executor performs these operations in order:
 
 1. Recalculate AVWAP and sigma bands.
 2. Cancel the previous unfilled entry pair.
-3. Place a Long limit entry from `open_sigma_1` to `close_sigma_1`.
-4. Place a Short limit entry from `open_sigma_2` to `close_sigma_2`.
+3. Place a Long market trigger at `open_sigma_1`, with SL and TP attached.
+4. Place a Short market trigger at `open_sigma_2`, with SL and TP attached.
 
-The example config uses `+1σ → +2σ` and `-1σ → -2σ`. MEXC validates attached protection
-against the current price and rejects breakout stops before their entries fill, so the
-executor saves the calculated protection levels and installs exchange-side SL and TP
-immediately after detecting a fill. It first cancels the unfilled sibling. No new
+The example config uses `+1σ → +2σ` and `-1σ → -2σ`. These are MEXC plan orders, not
+ordinary limits: the Long triggers when price rises to `+1σ`, and the Short triggers when
+price falls to `-1σ`. Each trigger carries its exchange-side stop loss and take profit,
+so protection is created with the entry rather than added through a later position API.
+After detecting a fill, the executor cancels the unfilled sibling. No new
 entries are submitted while the position remains open. The pair also has a strict
 10-minute maximum lifetime, although normal candle refresh may replace it sooner. MEXC entry
 cancellation is not atomic OCO, so there remains a short polling window in which both
