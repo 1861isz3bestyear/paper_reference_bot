@@ -31,17 +31,13 @@ def bot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[cli.RealBot, M
     return instance, client
 
 
-def test_places_plus_and_minus_trigger_pair_with_attached_protection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_places_plus_and_minus_trigger_pair_and_saves_protection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     instance, client = bot(monkeypatch, tmp_path)
     action = instance.reconcile_once(180)
     assert "refreshed" in action
     calls = client.submit_trigger_order.call_args_list
     assert [call.kwargs["side"] for call in calls] == [1, 3]
     assert [call.kwargs["trigger_price"] for call in calls] == [Decimal("0.000011"), Decimal("0.000009")]
-    assert calls[0].kwargs["take_profit_price"] == Decimal("0.000012")
-    assert calls[0].kwargs["stop_loss_price"] == Decimal("0.000010")
-    assert calls[1].kwargs["take_profit_price"] == Decimal("0.000008")
-    assert calls[1].kwargs["stop_loss_price"] == Decimal("0.000009")
     assert instance.state.protections["one"]["take_profit"] == "0.000012"
     assert instance.state.protections["two"]["take_profit"] == "0.000008"
 
@@ -69,7 +65,10 @@ def test_fill_cancels_sibling_and_places_no_pair(monkeypatch: pytest.MonkeyPatch
     client.open_plan_orders.return_value = [{"orderId": "sibling"}]
     client.positions.return_value = [{"positionId": 99, "holdVol": 5, "positionType": 1}]
     action = instance.reconcile_once(180)
-    assert "exchange-side SL/TP active" in action
+    assert "exchange-side SL/TP installed" in action
+    client.set_position_protection.assert_called_once_with(
+        99, stop_loss_price=Decimal("0.000010"), take_profit_price=Decimal("0.000012")
+    )
     client.cancel_plan_orders.assert_called_once_with("SHIB_USDT", ["sibling"])
     client.submit_trigger_order.assert_not_called()
 
@@ -134,13 +133,12 @@ def test_missing_trigger_waits_for_position_without_losing_recovery_plan(
     assert instance.state.protections["filled"]["take_profit"] == "2"
 
 
-def test_client_submits_directional_market_trigger_with_attached_sltp(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_client_submits_directional_market_trigger(monkeypatch: pytest.MonkeyPatch) -> None:
     client = MEXCFuturesClient("key", "secret")
     request = Mock(return_value=456)
     monkeypatch.setattr(client, "_request", request)
     result = client.submit_trigger_order(
         symbol="SHIB_USDT", side=3, volume=1300, trigger_price=Decimal("0.000009"),
-        take_profit_price=Decimal("0.000008"), stop_loss_price=Decimal("0.000010"),
         leverage=1, open_type=1,
     )
     assert result == 456
@@ -150,6 +148,18 @@ def test_client_submits_directional_market_trigger_with_attached_sltp(monkeypatc
         "symbol": "SHIB_USDT", "vol": 1300, "side": 3, "type": 5,
         "openType": 1, "leverage": 1, "triggerPrice": "0.000009",
         "triggerType": 2, "executeCycle": 1, "trend": 1,
-        "takeProfitPrice": "0.000008",
-        "stopLossPrice": "0.000010",
     }
+
+
+def test_client_installs_both_position_protection_prices(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = MEXCFuturesClient("key", "secret")
+    request = Mock(return_value=True)
+    monkeypatch.setattr(client, "_request", request)
+    client.set_position_protection(
+        99, stop_loss_price=Decimal("0.000010"), take_profit_price=Decimal("0.000012")
+    )
+    request.assert_called_once_with("POST", "/api/v1/private/stoporder/change_plan_order", {
+        "positionId": 99,
+        "stopLossPrice": "0.000010",
+        "takeProfitPrice": "0.000012",
+    })

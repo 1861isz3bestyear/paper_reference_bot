@@ -61,7 +61,7 @@ class MEXCFuturesClient:
             raise MEXCError(f"MEXC request failed: {exc}") from None
         if not isinstance(payload, dict) or not payload.get("success", False):
             message = payload.get("message", "unexpected response") if isinstance(payload, dict) else "unexpected response"
-            raise MEXCError(f"MEXC API error: {message}")
+            raise MEXCError(f"MEXC {method} {path} API error: {message}")
         return payload.get("data")
 
     def assets(self) -> list[dict[str, Any]]:
@@ -128,8 +128,6 @@ class MEXCFuturesClient:
         side: int,
         volume: int,
         trigger_price: Decimal,
-        take_profit_price: Decimal,
-        stop_loss_price: Decimal,
         leverage: int,
         open_type: int,
     ) -> Any:
@@ -144,10 +142,17 @@ class MEXCFuturesClient:
             "triggerType": 1 if side == 1 else 2,
             "executeCycle": 1,
             "trend": 1,
-            "takeProfitPrice": format(take_profit_price, "f"),
-            "stopLossPrice": format(stop_loss_price, "f"),
         }
         return self._request("POST", "/api/v1/private/planorder/place", payload)
+
+    def set_position_protection(
+        self, position_id: Any, *, stop_loss_price: Decimal, take_profit_price: Decimal
+    ) -> Any:
+        return self._request("POST", "/api/v1/private/stoporder/change_plan_order", {
+            "positionId": position_id,
+            "stopLossPrice": format(stop_loss_price, "f"),
+            "takeProfitPrice": format(take_profit_price, "f"),
+        })
 
     def available_usdt(self) -> Decimal:
         asset = next((item for item in self.assets() if item.get("currency") == "USDT"), None)

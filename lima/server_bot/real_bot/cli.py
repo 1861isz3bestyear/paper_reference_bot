@@ -168,8 +168,12 @@ class RealBot:
                     plans = self.state.protections or {}
                     plan = next((value for value in plans.values() if value.get("side") == side), None)
                 if not plan: raise RuntimeError(f"no saved SL/TP plan for filled {side} position")
-                # Trigger entries carry exchange-side SL/TP. Once a fill exists,
-                # cancel its still-pending sibling and retain the position marker.
+                # Protect the filled position before canceling its pending sibling.
+                self.client.set_position_protection(
+                    raw_position_id,
+                    stop_loss_price=Decimal(plan["stop_loss"]),
+                    take_profit_price=Decimal(plan["take_profit"]),
+                )
                 sibling_ids = [value for value in (self.state.order_ids or []) if value in open_ids]
                 if sibling_ids: self.client.cancel_plan_orders(self.symbol, sibling_ids)
                 self.state.protected_position_id = position_id
@@ -177,7 +181,7 @@ class RealBot:
                 self.state.orders_placed_candle, self.state.orders_placed_at = None, None
                 self.state.entry_transition_seen_at = None
                 self.state.save()
-                return f"fill detected; sibling canceled; {side} exchange-side SL/TP active"
+                return f"fill detected; {side} exchange-side SL/TP installed; sibling canceled"
             return None
         tracked = set(self.state.order_ids or [])
         if tracked - open_ids:
@@ -227,13 +231,13 @@ class RealBot:
         self.state.entry_transition_seen_at = None
         self.state.save()
         first = response_order_id(self.client.submit_trigger_order(symbol=self.symbol, side=1, volume=volume, trigger_price=entry1,
-            take_profit_price=exit1, stop_loss_price=stop1, leverage=self.leverage, open_type=self.open_type))
+            leverage=self.leverage, open_type=self.open_type))
         self.state.order_ids = [first]
         self.state.protections = {first: self.state.side_protections["Long"]}
         self.state.save()
         try:
             second = response_order_id(self.client.submit_trigger_order(symbol=self.symbol, side=3, volume=volume, trigger_price=entry2,
-                take_profit_price=exit2, stop_loss_price=stop2, leverage=self.leverage, open_type=self.open_type))
+                leverage=self.leverage, open_type=self.open_type))
         except Exception as submit_error:
             try:
                 self.client.cancel_plan_orders(self.symbol, [first])
