@@ -1,4 +1,5 @@
 .env
+mexcapi.env
 *.pid
 *.log
 *.instance.lock
