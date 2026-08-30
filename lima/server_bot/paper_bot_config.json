@@ -14,5 +14,9 @@
   "ticker": "SHIB_USDT",
   "reverse_ticker": false,
   "open_position_side": "Both",
-  "minimum_order_size": 0.01
+  "minimum_order_size": 0.01,
+  "open_sigma_1": 1.0,
+  "close_sigma_1": 2.0,
+  "open_sigma_2": -1.0,
+  "close_sigma_2": -2.0
 }

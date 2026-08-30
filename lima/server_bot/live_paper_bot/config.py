@@ -31,6 +31,10 @@ class PaperBotConfig:
     reverse_ticker: bool = False
     open_position_side: str = "Both"
     minimum_order_size: float = 0.01
+    open_sigma_1: float | None = None
+    close_sigma_1: float | None = None
+    open_sigma_2: float | None = None
+    close_sigma_2: float | None = None
 
     def validate(self) -> None:
         if self.strategy_mode not in {"AVWAP crossover", "VWAP band mean reversion"}:
@@ -45,6 +49,14 @@ class PaperBotConfig:
             raise ValueError("Initial paper capital must be positive.")
         if self.minimum_order_size < 0.01:
             raise ValueError("Minimum order size must be at least 0.01.")
+        sigmas = (self.open_sigma_1, self.close_sigma_1, self.open_sigma_2, self.close_sigma_2)
+        if any(value is not None for value in sigmas):
+            if any(value is None for value in sigmas):
+                raise ValueError("All four real-order sigma values must be configured together.")
+            if not (0 < self.open_sigma_1 <= 3 and 0 < self.close_sigma_1 <= 3):
+                raise ValueError("Sigma leg 1 must use positive values between 0 and 3.")
+            if not (-3 <= self.open_sigma_2 < 0 and -3 <= self.close_sigma_2 < 0):
+                raise ValueError("Sigma leg 2 must use negative values between -3 and 0.")
         if self.stop_loss_pct < 0:
             raise ValueError("Stop loss cannot be negative.")
         if not 1 <= self.vwap_anchor_reset_weeks <= 52:
@@ -68,7 +80,7 @@ class PaperBotConfig:
 
     def to_json(self) -> str:
         self.validate()
-        return json.dumps(asdict(self), indent=2) + "\n"
+        return json.dumps({key: value for key, value in asdict(self).items() if value is not None}, indent=2) + "\n"
 
     def save(self, path: Path = PAPER_BOT_CONFIG_FILE) -> None:
         content = self.to_json()
@@ -88,6 +100,10 @@ class PaperBotConfig:
             values.pop("fee_pct", None)  # Removed: fees are read from the selected exchange.
             values.setdefault("open_position_side", "Both")
             values.setdefault("minimum_order_size", 0.01)
+            values.setdefault("open_sigma_1", None)
+            values.setdefault("close_sigma_1", None)
+            values.setdefault("open_sigma_2", None)
+            values.setdefault("close_sigma_2", None)
             config = cls(**values)
         except FileNotFoundError as exc:
             raise RuntimeError(f"Config file not found: {path}. Save it from the Streamlit app first.") from exc

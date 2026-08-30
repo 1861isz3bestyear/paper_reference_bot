@@ -155,6 +155,7 @@ class TestPaperBot:
             "data_source", "ticker", "reverse_ticker",
             "open_position_side",
             "minimum_order_size",
+            "open_sigma_1", "close_sigma_1", "open_sigma_2", "close_sigma_2",
         }
 
     def test_loads_older_config_without_anchor_offset_fields(self) -> None:
