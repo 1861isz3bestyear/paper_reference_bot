@@ -108,9 +108,10 @@ class MEXCFuturesClient:
         return data
 
     def submit_market_order(
-        self, *, symbol: str, side: int, volume: int, leverage: int, open_type: int, external_oid: str
+        self, *, symbol: str, side: int, volume: int, leverage: int, open_type: int, external_oid: str,
+        take_profit_price: Decimal | None = None, stop_loss_price: Decimal | None = None,
     ) -> Any:
-        return self._request("POST", "/api/v1/private/order/submit", {
+        payload: dict[str, Any] = {
             "symbol": symbol,
             "price": 0,
             "vol": volume,
@@ -119,7 +120,23 @@ class MEXCFuturesClient:
             "openType": open_type,
             "leverage": leverage,
             "externalOid": external_oid,
-        })
+        }
+        if take_profit_price is not None:
+            payload["takeProfitPrice"] = format(take_profit_price, "f")
+        if stop_loss_price is not None:
+            payload["stopLossPrice"] = format(stop_loss_price, "f")
+        return self._request("POST", "/api/v1/private/order/submit", payload)
+
+    def last_price(self, symbol: str) -> Decimal:
+        try:
+            with urlopen(f"{self.base_url.rstrip('/')}/api/v1/contract/ticker?symbol={symbol}", timeout=self.timeout) as response:
+                payload = json.loads(response.read().decode())
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise MEXCError(f"Could not load MEXC last price: {exc}") from None
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict) or not payload.get("success", False) or not isinstance(data, dict):
+            raise MEXCError(f"MEXC returned no ticker for {symbol}")
+        return Decimal(str(data["lastPrice"]))
 
     def submit_trigger_order(
         self,

@@ -31,6 +31,8 @@ class RealState:
     protected_position_id: str | None = None
     side_protections: dict[str, dict[str, str]] | None = None
     entry_transition_seen_at: str | None = None
+    entry_submission: dict[str, str] | None = None
+    halted_reason: str | None = None
 
     @classmethod
     def load(cls) -> "RealState":
@@ -140,8 +142,8 @@ class RealBot:
         detail = self.client.contract(self.symbol)
         size, tick = Decimal(str(detail["contractSize"])), Decimal(str(detail["priceUnit"]))
         available_margin = self.client.available_usdt()
-        pair_safe_notional = available_margin * Decimal("0.98") * Decimal(self.leverage) / 2
-        allocation = min(Decimal(str(self.config.initial_capital)), pair_safe_notional)
+        safe_notional = available_margin * Decimal("0.98") * Decimal(self.leverage)
+        allocation = min(Decimal(str(self.config.initial_capital)), safe_notional)
         required = max(MINIMUM_NOTIONAL, Decimal(str(self.config.minimum_order_size)))
         if allocation < required: raise RuntimeError(f"allocation {allocation} USDT is below {required} USDT")
         volume = int((allocation / (max(entries) * size)).to_integral_value(rounding=ROUND_DOWN))
@@ -151,112 +153,93 @@ class RealBot:
         return volume, tick, size
 
     def reconcile_once(self, max_age_seconds: int, order_lifetime_minutes: int = 10) -> str | None:
-        open_ids = {str(item.get("orderId")) for item in self.client.open_plan_orders(self.symbol)}
         positions = [item for item in self.client.positions(self.symbol) if Decimal(str(item.get("holdVol", 0))) > 0]
         if len(positions) > 1:
-            self._cancel_tracked(open_ids); raise RuntimeError("multiple positions found; entries canceled")
+            self.state.halted_reason = "multiple positions found"
+            self.state.save()
+            raise RuntimeError("multiple positions found; trading halted")
         if positions:
             position = positions[0]
             raw_position_id = position.get("positionId") or position.get("id")
-            if raw_position_id is None: raise RuntimeError("MEXC position has no position ID; cannot install protection")
+            if raw_position_id is None: raise RuntimeError("MEXC position has no position ID")
             position_id = str(raw_position_id)
             side = "Long" if int(position.get("positionType", 0)) == 1 else "Short" if int(position.get("positionType", 0)) == 2 else None
-            if side is None: raise RuntimeError("MEXC position has an unknown side; cannot install protection")
+            if side is None: raise RuntimeError("MEXC position has an unknown side")
             if self.state.protected_position_id != position_id:
-                plan = (self.state.side_protections or {}).get(side)
-                if plan is None:
-                    plans = self.state.protections or {}
-                    plan = next((value for value in plans.values() if value.get("side") == side), None)
-                if not plan: raise RuntimeError(f"no saved SL/TP plan for filled {side} position")
-                # Protect the filled position before canceling its pending sibling.
-                self.client.set_position_protection(
-                    raw_position_id,
-                    stop_loss_price=Decimal(plan["stop_loss"]),
-                    take_profit_price=Decimal(plan["take_profit"]),
-                )
-                sibling_ids = [value for value in (self.state.order_ids or []) if value in open_ids]
-                if sibling_ids: self.client.cancel_plan_orders(self.symbol, sibling_ids)
+                plan = self.state.entry_submission or (self.state.side_protections or {}).get(side)
+                if not plan:
+                    self.state.halted_reason = f"no saved protection for {side} position"
+                    self.state.save()
+                    raise RuntimeError(self.state.halted_reason)
+                try:
+                    self.client.set_position_protection(
+                        raw_position_id, stop_loss_price=Decimal(plan["stop_loss"]),
+                        take_profit_price=Decimal(plan["take_profit"]),
+                    )
+                except Exception as protection_error:
+                    close_side = 4 if side == "Long" else 2
+                    try:
+                        self.client.submit_market_order(
+                            symbol=self.symbol, side=close_side, volume=int(Decimal(str(position["holdVol"]))),
+                            leverage=self.leverage, open_type=self.open_type,
+                            external_oid=f"emergency-close-{int(time.time())}",
+                        )
+                    except Exception as close_error:
+                        self.state.halted_reason = f"SL/TP failed ({protection_error}); EMERGENCY CLOSE FAILED ({close_error})"
+                        self.state.save()
+                        raise RuntimeError(self.state.halted_reason) from protection_error
+                    self.state.halted_reason = f"SL/TP failed ({protection_error}); emergency close submitted"
+                    self.state.save()
+                    raise RuntimeError(self.state.halted_reason) from protection_error
                 self.state.protected_position_id = position_id
-                self.state.order_ids, self.state.protections, self.state.side_protections = [], {}, {}
-                self.state.orders_placed_candle, self.state.orders_placed_at = None, None
-                self.state.entry_transition_seen_at = None
+                self.state.entry_submission = None
                 self.state.save()
-                return f"fill detected; {side} exchange-side SL/TP installed; sibling canceled"
+                return f"{side} position confirmed with exchange-side SL/TP"
             return None
-        tracked = set(self.state.order_ids or [])
-        if tracked - open_ids:
-            if open_ids & tracked:
-                self.client.cancel_plan_orders(self.symbol, sorted(open_ids & tracked))
-            now = datetime.now(timezone.utc)
-            if self.state.entry_transition_seen_at is None:
-                self.state.entry_transition_seen_at = now.isoformat()
-                self.state.save()
-                return "entry triggered; sibling canceled; waiting for position confirmation"
-            transition_at = datetime.fromisoformat(self.state.entry_transition_seen_at.replace("Z", "+00:00"))
-            if now - transition_at < timedelta(seconds=60):
-                return "waiting for triggered entry position confirmation"
-            self._cancel_tracked(open_ids)
-            return "trigger disappeared without a position; cleared pair after 60 seconds"
-        if self.state.orders_placed_at:
-            placed_at = datetime.fromisoformat(self.state.orders_placed_at.replace("Z", "+00:00"))
-            if datetime.now(timezone.utc) - placed_at >= timedelta(minutes=order_lifetime_minutes):
-                self._cancel_tracked(open_ids)
-                return f"canceled unfilled pair after {order_lifetime_minutes} minutes"
+        if self.state.halted_reason:
+            raise RuntimeError(f"trading halted: {self.state.halted_reason}")
+        if self.state.entry_submission:
+            submitted = datetime.fromisoformat(self.state.entry_submission["submitted_at"].replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) - submitted < timedelta(seconds=30):
+                return "waiting for market-entry position confirmation"
+            self.state.halted_reason = "market entry outcome remained uncertain for 30 seconds"
+            self.state.save()
+            raise RuntimeError(self.state.halted_reason)
+        if self.state.protected_position_id:
+            self.state.protected_position_id = None
+            self.state.side_protections = {}
+            self.state.save()
 
         latest, launched = self._latest_candle(max_age_seconds)
-        if self.state.last_calculated_candle == latest.isoformat(): return None
-
-        entry1, exit1, entry2, exit2 = self._bands(latest, launched)
-        volume, tick, contract_size = self._sizing((entry1, entry2))
-        entry1, exit1, entry2, exit2 = (self._tick(value, tick) for value in (entry1, exit1, entry2, exit2))
-        if not (exit1 > entry1 and exit2 < entry2): raise RuntimeError("exits must be beyond their entry bands")
-        loss_pct = Decimal(str(self.config.stop_loss_pct)) / 100
-        # Deposit is the actual isolated/cross margin implied by notional and leverage.
-        # Converting its loss budget back to price makes SL independent of token price/contract size.
-        long_deposit = Decimal(volume) * contract_size * entry1 / Decimal(self.leverage)
-        short_deposit = Decimal(volume) * contract_size * entry2 / Decimal(self.leverage)
-        long_delta = long_deposit * loss_pct / (Decimal(volume) * contract_size) if loss_pct else Decimal(0)
-        short_delta = short_deposit * loss_pct / (Decimal(volume) * contract_size) if loss_pct else Decimal(0)
-        stop1 = self._tick(entry1 - long_delta, tick) if loss_pct else None
-        stop2 = self._tick(entry2 + short_delta, tick) if loss_pct else None
-        # Required ordering: calculate successfully, cancel the old pair, then submit both replacements.
-        if self.state.order_ids: self._cancel_tracked(open_ids)
-        self.state.side_protections = {
-            "Long": {"side": "Long", "stop_loss": format(stop1, "f"), "take_profit": format(exit1, "f")},  # type: ignore[arg-type]
-            "Short": {"side": "Short", "stop_loss": format(stop2, "f"), "take_profit": format(exit2, "f")},  # type: ignore[arg-type]
-        }
-        self.state.order_ids, self.state.protections = [], {}
-        self.state.orders_placed_candle = latest.isoformat()
-        self.state.orders_placed_at = datetime.now(timezone.utc).isoformat()
-        self.state.entry_transition_seen_at = None
-        self.state.save()
-        first = response_order_id(self.client.submit_trigger_order(symbol=self.symbol, side=1, volume=volume, trigger_price=entry1,
-            leverage=self.leverage, open_type=self.open_type))
-        self.state.order_ids = [first]
-        self.state.protections = {first: self.state.side_protections["Long"]}
-        self.state.save()
-        try:
-            second = response_order_id(self.client.submit_trigger_order(symbol=self.symbol, side=3, volume=volume, trigger_price=entry2,
-                leverage=self.leverage, open_type=self.open_type))
-        except Exception as submit_error:
-            try:
-                self.client.cancel_plan_orders(self.symbol, [first])
-            except Exception as cancel_error:
-                raise RuntimeError(
-                    f"second entry failed ({submit_error}); first entry cancellation failed ({cancel_error})"
-                ) from submit_error
-            self.state.order_ids, self.state.protections, self.state.side_protections = [], {}, {}
-            self.state.orders_placed_candle, self.state.orders_placed_at = None, None
+        if self.state.last_calculated_candle != latest.isoformat():
+            entry1, exit1, entry2, exit2 = self._bands(latest, launched)
+            volume, tick, contract_size = self._sizing((entry1, entry2))
+            entry1, exit1, entry2, exit2 = (self._tick(value, tick) for value in (entry1, exit1, entry2, exit2))
+            if not (exit1 > entry1 and exit2 < entry2): raise RuntimeError("exits must be beyond their entry bands")
+            loss_pct = Decimal(str(self.config.stop_loss_pct)) / 100
+            stop1 = self._tick(entry1 - entry1 * loss_pct / Decimal(self.leverage), tick)
+            stop2 = self._tick(entry2 + entry2 * loss_pct / Decimal(self.leverage), tick)
+            self.state.side_protections = {
+                "Long": {"side": "Long", "trigger": format(entry1, "f"), "stop_loss": format(stop1, "f"), "take_profit": format(exit1, "f"), "volume": str(volume)},
+                "Short": {"side": "Short", "trigger": format(entry2, "f"), "stop_loss": format(stop2, "f"), "take_profit": format(exit2, "f"), "volume": str(volume)},
+            }
+            self.state.last_calculated_candle = latest.isoformat()
             self.state.save()
-            raise
-        self.state.last_calculated_candle, self.state.order_ids = latest.isoformat(), [first, second]
-        self.state.protections = {
-            first: self.state.side_protections["Long"],
-            second: self.state.side_protections["Short"],
-        }
-        self.state.protected_position_id = None
+        plans = self.state.side_protections or {}
+        price = self.client.last_price(self.symbol)
+        side = "Long" if price >= Decimal(plans["Long"]["trigger"]) else "Short" if price <= Decimal(plans["Short"]["trigger"]) else None
+        if side is None: return None
+        plan = dict(plans[side])
+        plan["submitted_at"] = datetime.now(timezone.utc).isoformat()
+        self.state.entry_submission = plan
         self.state.save()
-        return f"placed refreshed +sigma/-sigma trigger pair for {latest.isoformat()} ({volume} contracts each)"
+        self.client.submit_market_order(
+            symbol=self.symbol, side=1 if side == "Long" else 3, volume=int(plan["volume"]),
+            leverage=self.leverage, open_type=self.open_type,
+            external_oid=f"avwap-{side.lower()}-{int(time.time())}",
+            stop_loss_price=Decimal(plan["stop_loss"]), take_profit_price=Decimal(plan["take_profit"]),
+        )
+        return f"{side} market entry submitted with attached SL/TP; awaiting position confirmation"
 
     def run(self, *, poll_seconds: int, max_age_seconds: int, order_lifetime_minutes: int) -> None:
         signal.signal(signal.SIGTERM, self.stop); signal.signal(signal.SIGINT, self.stop)

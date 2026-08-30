@@ -76,26 +76,22 @@ uv run python -m server_bot.cli run-real --confirm-live \
 After each completed candle the executor performs these operations in order:
 
 1. Recalculate AVWAP and sigma bands.
-2. Cancel the previous unfilled entry pair.
-3. Place a Long market trigger at `open_sigma_1`.
-4. Place a Short market trigger at `open_sigma_2`.
+2. Monitor MEXC's live last price locally.
+3. At `open_sigma_1`, submit one Long market entry with attached SL/TP.
+4. At `open_sigma_2`, submit one Short market entry with attached SL/TP.
 
-The example config uses `+1σ → +2σ` and `-1σ → -2σ`. These are MEXC plan orders, not
-ordinary limits: the Long triggers when price rises to `+1σ`, and the Short triggers when
-price falls to `-1σ`. MEXC plan entries do not accept attached stop-loss/take-profit
-fields. The executor therefore saves both protection plans before submission. After a
-fill, it installs both prices through MEXC's stop-order plan endpoint before canceling
-the unfilled sibling. No new
-entries are submitted while the position remains open. The pair also has a strict
-10-minute maximum lifetime, although normal candle refresh may replace it sooner. MEXC entry
-cancellation is not atomic OCO, so there remains a short polling window in which both
-orders could fill; multiple positions cause all tracked entries to be canceled and the
-executor to pause order placement.
+The example config uses `+1σ → +2σ` and `-1σ → -2σ`. MEXC rejects private plan-order
+placement for this account, so crossover detection runs in the executor. Only the side
+that crosses is submitted; there is no resting sibling order. Submission intent and its
+protection plan are persisted before the API call for timeout/crash recovery. After the
+fill, the executor confirms protection through MEXC's stop-order endpoint. If protection
+cannot be confirmed, it submits an emergency market close and permanently halts new
+entries until an operator clears the state after inspecting the account.
 
 `initial_capital` is the maximum USDT notional per entry. Prices and volumes are rounded
-down to MEXC contract steps, and orders below `0.01 USDT` are rejected. Because both
-entries reserve margin simultaneously, each leg is also capped at 49% of available margin
-(converted to notional using configured leverage), leaving 2% for fees and rounding.
+down to MEXC contract steps, and orders below `0.01 USDT` are rejected. Because only one
+entry is submitted, it is capped at 98% of available margin (converted to notional using
+configured leverage), leaving 2% for fees and rounding.
 Each stop loss is calculated from the actual rounded order deposit (notional divided by
 configured leverage): the maximum modeled loss is `deposit × stop_loss_pct`. Each take
 profit is the corresponding `close_sigma` price.
