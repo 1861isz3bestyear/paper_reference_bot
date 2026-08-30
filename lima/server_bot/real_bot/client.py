@@ -136,6 +136,7 @@ class MEXCFuturesClient:
             "vol": volume,
             "side": side,
             "type": 5,
+            "orderPrice": 0,
             "openType": open_type,
             "leverage": leverage,
             "triggerPrice": format(trigger_price, "f"),

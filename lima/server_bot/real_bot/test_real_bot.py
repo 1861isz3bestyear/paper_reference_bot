@@ -145,7 +145,7 @@ def test_client_submits_directional_market_trigger(monkeypatch: pytest.MonkeyPat
     path, payload = request.call_args.args[1:]
     assert path == "/api/v1/private/planorder/place"
     assert payload == {
-        "symbol": "SHIB_USDT", "vol": 1300, "side": 3, "type": 5,
+        "symbol": "SHIB_USDT", "vol": 1300, "side": 3, "type": 5, "orderPrice": 0,
         "openType": 1, "leverage": 1, "triggerPrice": "0.000009",
         "triggerType": 2, "executeCycle": 1, "trend": 1,
     }
