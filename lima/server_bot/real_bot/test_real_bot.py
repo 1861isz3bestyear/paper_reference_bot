@@ -35,8 +35,10 @@ def test_places_plus_and_minus_limit_pair(monkeypatch: pytest.MonkeyPatch, tmp_p
     action = instance.reconcile_once(180)
     assert "refreshed" in action
     assert [call.kwargs["side"] for call in client.submit_limit_order.call_args_list] == [1, 3]
-    assert client.submit_limit_order.call_args_list[0].kwargs["take_profit_price"] == Decimal("0.000012")
-    assert client.submit_limit_order.call_args_list[1].kwargs["take_profit_price"] == Decimal("0.000008")
+    assert client.submit_limit_order.call_args_list[0].kwargs["take_profit_price"] is None
+    assert client.submit_limit_order.call_args_list[1].kwargs["stop_loss_price"] is None
+    assert instance.state.protections["one"]["take_profit"] == "0.000012"
+    assert instance.state.protections["two"]["take_profit"] == "0.000008"
 
 
 def test_new_candle_cancels_previous_before_replacement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -55,11 +57,17 @@ def test_new_candle_cancels_previous_before_replacement(monkeypatch: pytest.Monk
 def test_fill_cancels_sibling_and_places_no_pair(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     instance, client = bot(monkeypatch, tmp_path)
     instance.state.order_ids = ["filled", "sibling"]
+    instance.state.protections = {
+        "filled": {"side": "Long", "stop_loss": "0.000010", "take_profit": "0.000012"},
+        "sibling": {"side": "Short", "stop_loss": "0.000010", "take_profit": "0.000008"},
+    }
     client.open_orders.return_value = [{"orderId": "sibling"}]
-    client.positions.return_value = [{"holdVol": 5, "positionType": 1}]
+    client.positions.return_value = [{"positionId": 99, "holdVol": 5, "positionType": 1}]
     action = instance.reconcile_once(180)
-    assert "canceled sibling" in action
+    assert "SL/TP installed" in action
     client.cancel_orders.assert_called_once_with("SHIB_USDT", ["sibling"])
+    client.set_position_stop_loss.assert_called_once_with(99, Decimal("0.000010"))
+    client.set_position_take_profit.assert_called_once_with(99, Decimal("0.000012"))
     client.submit_limit_order.assert_not_called()
 
 
@@ -87,6 +95,5 @@ def test_stop_prices_use_actual_deposit_and_leverage(monkeypatch: pytest.MonkeyP
     instance.leverage = 2
     client.contract.return_value["priceUnit"] = "0.000000001"
     instance.reconcile_once(180)
-    long_order, short_order = client.submit_limit_order.call_args_list
-    assert long_order.kwargs["stop_loss_price"] == Decimal("0.000010978")
-    assert short_order.kwargs["stop_loss_price"] == Decimal("0.000009018")
+    assert instance.state.protections["one"]["stop_loss"] == "0.000010978"
+    assert instance.state.protections["two"]["stop_loss"] == "0.000009018"

@@ -80,8 +80,10 @@ After each completed candle the executor performs these operations in order:
 3. Place a Long limit entry from `open_sigma_1` to `close_sigma_1`.
 4. Place a Short limit entry from `open_sigma_2` to `close_sigma_2`.
 
-The example config uses `+1σ → +2σ` and `-1σ → -2σ`. Take-profit prices are attached to
-the entries. When a position is detected, the unfilled sibling is canceled and no new
+The example config uses `+1σ → +2σ` and `-1σ → -2σ`. MEXC validates attached protection
+against the current price and rejects breakout stops before their entries fill, so the
+executor saves the calculated protection levels and installs exchange-side SL and TP
+immediately after detecting a fill. It first cancels the unfilled sibling. No new
 entries are submitted while the position remains open. The pair also has a strict
 10-minute maximum lifetime, although normal candle refresh may replace it sooner. MEXC entry
 cancellation is not atomic OCO, so there remains a short polling window in which both

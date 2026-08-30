@@ -119,7 +119,7 @@ class MEXCFuturesClient:
         side: int,
         volume: int,
         price: Decimal,
-        take_profit_price: Decimal,
+        take_profit_price: Decimal | None,
         stop_loss_price: Decimal | None,
         leverage: int,
         open_type: int,
@@ -133,12 +133,25 @@ class MEXCFuturesClient:
             "type": 1,
             "openType": open_type,
             "leverage": leverage,
-            "takeProfitPrice": format(take_profit_price, "f"),
             "externalOid": external_oid,
         }
+        if take_profit_price is not None:
+            payload["takeProfitPrice"] = format(take_profit_price, "f")
         if stop_loss_price is not None:
             payload["stopLossPrice"] = format(stop_loss_price, "f")
         return self._request("POST", "/api/v1/private/order/submit", payload)
+
+    def set_position_stop_loss(self, position_id: Any, price: Decimal) -> Any:
+        return self._request("POST", "/api/v1/private/position/change_stop_loss_price", {
+            "positionId": position_id,
+            "stopLossPrice": format(price, "f"),
+        })
+
+    def set_position_take_profit(self, position_id: Any, price: Decimal) -> Any:
+        return self._request("POST", "/api/v1/private/position/change_take_profit_price", {
+            "positionId": position_id,
+            "takeProfitPrice": format(price, "f"),
+        })
 
     def available_usdt(self) -> Decimal:
         asset = next((item for item in self.assets() if item.get("currency") == "USDT"), None)
