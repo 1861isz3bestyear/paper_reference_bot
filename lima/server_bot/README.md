@@ -9,6 +9,9 @@ Both bots receive identical strategy and market settings. Their ledgers, cursors
 
 ## Install
 
+For Debian user-systemd installation of all three bots and automated diagnostic archives, use the
+centralized [`../install`](../install/README.md) utility.
+
 ```bash
 uv sync
 uv run pytest
@@ -96,29 +99,8 @@ the configured `close_order_vwap_sigma` band and is refreshed after every comple
 while the position remains open. Failure to install the initial protection triggers an
 emergency close and halts further trading.
 
-Example systemd service:
-
-```ini
-[Unit]
-Description=Server Bot Bybit demo executor
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=bot
-WorkingDirectory=/opt/server_bot
-ExecStart=/usr/local/bin/uv run python -m bybit_demo_bot.cli run --resume --config /opt/server_bot/paper_bot_config.json --env /opt/server_bot/bybitapidemo.env
-Restart=on-failure
-RestartSec=10
-TimeoutStopSec=30
-KillSignal=SIGTERM
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-```
+Use the centralized [`../install`](../install/README.md) utility for the supported user-systemd
+service; do not maintain a separate hand-written unit.
 
 ## Real-money MEXC executor
 
