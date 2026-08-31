@@ -68,6 +68,8 @@ def test_units_have_safe_expected_commands(layout):
     assert "run-bybit-demo --resume" in units["bybit-demo.service"]
     for text in units.values():
         assert "Restart=on-failure" in text and "KillSignal=SIGINT" in text
+        assert f"WorkingDirectory={layout.project}" in text
+        assert f'WorkingDirectory="{layout.project}"' not in text
         assert " reset" not in text
 
 
@@ -96,7 +98,14 @@ def test_service_action_and_uninstall(layout):
 
 
 def test_check_services_success_and_failures(capsys):
-    processes = "1 reference_bot.cli\n2 live_paper_bot.cli\n3 run-bybit-demo\n"
+    processes = (
+        "1 uv run python -m reference_bot.cli\n"
+        "2 reference_bot.cli\n"
+        "3 uv run python -m live_paper_bot.cli\n"
+        "4 live_paper_bot.cli\n"
+        "5 uv run python -m server_bot.cli run-bybit-demo\n"
+        "6 run-bybit-demo\n"
+    )
     okay = FakeRunner([CompletedProcess([], 0, "", ""), CompletedProcess([], 0, "", ""),
                        CompletedProcess([], 0, processes, "")])
     assert services.check_services(okay)
@@ -120,7 +129,8 @@ def test_redact_and_collect_logs(layout, tmp_path, monkeypatch):
     report = tmp_path / "bot-diagnostics-STAMP"
     assert len(list(report.iterdir())) == 6
     assert "secret" not in (report / "bybit-demo.service.log").read_text()
-    assert runner.calls[0][0][4:6] == ["--since", "1 hour ago"]
+    assert runner.calls[0][0][3:5] == ["--since", "1 hour ago"]
+    assert runner.calls[0][0][1:3] == ["--user-unit", "paper-bot-reference.service"]
     assert runner.calls[4][0][1:4] == ["run", "--project", str(layout.project)]
 
 

@@ -66,7 +66,7 @@ def unit_contents(layout: Layout) -> dict[str, str]:
     common = (
         "After=network-online.target\nWants=network-online.target\n\n"
         "[Service]\nType=simple\n"
-        f"WorkingDirectory={_quote(layout.project)}\n"
+        f"WorkingDirectory={layout.project}\n"
         "Environment=PYTHONUNBUFFERED=1\n"
     )
     suffix = (
@@ -135,7 +135,11 @@ def check_services(runner: Runner = run) -> bool:
         check=False,
         capture_output=True,
     )
-    lines = [line for line in processes.stdout.splitlines() if line.strip()]
+    lines = [
+        line
+        for line in processes.stdout.splitlines()
+        if line.strip() and "uv run " not in line
+    ]
     for marker in ("reference_bot.cli", "live_paper_bot.cli", "run-bybit-demo"):
         count = sum(marker in line for line in lines)
         if count != 1:
@@ -160,7 +164,7 @@ def collect_logs(layout: Layout, output_dir: Path, runner: Runner = run, *, sinc
     for service in SERVICE_NAMES:
         contents = _capture(
             runner,
-            ["journalctl", "--user", "-u", service, "--since", since, "--no-pager", "-o", "short-iso-precise"],
+            ["journalctl", "--user-unit", service, "--since", since, "--no-pager", "-o", "short-iso-precise"],
         )
         (report / f"{service}.log").write_text(contents, encoding="utf-8")
     commands = {
