@@ -1,5 +1,6 @@
 .env
 mexcapi.env
+bybitapi.env
 *.pid
 *.log
 *.instance.lock

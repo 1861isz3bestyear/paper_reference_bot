@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from real_bot.cli import ENV_FILE as REAL_ENV_FILE, run_real_command
+from bybit_demo_bot.cli import ENV_FILE as BYBIT_DEMO_ENV_FILE, run_demo_command
 
 from live_paper_bot.cli import (
     STATE_FILE as LIVE_STATE_FILE,
@@ -127,6 +128,11 @@ def parse_args() -> argparse.Namespace:
     real.add_argument("--poll-seconds", type=int, default=10)
     real.add_argument("--max-signal-age", type=int, default=180)
     real.add_argument("--order-lifetime-minutes", type=int, default=10)
+    demo = subparsers.add_parser("run-bybit-demo", help="Run the foreground Bybit demo-account executor.")
+    demo.add_argument("--config", type=Path, default=PAPER_BOT_CONFIG_FILE)
+    demo.add_argument("--env", type=Path, default=BYBIT_DEMO_ENV_FILE)
+    demo.add_argument("--resume", action="store_true")
+    demo.add_argument("--poll-seconds", type=int, default=10)
     return parser.parse_args()
 
 
@@ -150,7 +156,7 @@ def main() -> None:
         )
         print(message)
         raise SystemExit(status)
-    else:
+    elif args.command == "run-real":
         run_real_command(
             args.config,
             args.env,
@@ -159,6 +165,8 @@ def main() -> None:
             max_signal_age=args.max_signal_age,
             order_lifetime_minutes=args.order_lifetime_minutes,
         )
+    else:
+        run_demo_command(args.config, args.env, resume=args.resume, poll_seconds=args.poll_seconds)
 
 
 if __name__ == "__main__":

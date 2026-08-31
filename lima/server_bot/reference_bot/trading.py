@@ -21,10 +21,7 @@ from shared.models import Trade
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PAPER_ACCOUNT_FILE = PROJECT_ROOT / "reference_account.json"
-BYBIT_ENV_FILES = (
-    PROJECT_ROOT / "bybitapi.env",
-    PROJECT_ROOT / "testnetapi.env",
-)
+BYBIT_ENV_FILES = (PROJECT_ROOT / "bybitapi.env",)
 BYBIT_FEE_RATE_URL = "https://api.bybit.com/v5/account/fee-rate"
 BTC_QUANTITY_STEP = Decimal("0.001")
 
@@ -65,12 +62,8 @@ def load_bybit_credentials() -> tuple[str, str]:
                     name, value = stripped.split("=", 1)
                     values[name.strip()] = value.strip().strip("\"'")
             break
-    key = values.get("BYBIT_API_KEY") or values.get("BYBIT_TESTNET_API_KEY") or os.getenv("BYBIT_API_KEY", "")
-    secret = (
-        values.get("BYBIT_API_SECRET")
-        or values.get("BYBIT_TESTNET_API_SECRET")
-        or os.getenv("BYBIT_API_SECRET", "")
-    )
+    key = values.get("BYBIT_API_KEY") or os.getenv("BYBIT_API_KEY", "")
+    secret = values.get("BYBIT_API_SECRET") or os.getenv("BYBIT_API_SECRET", "")
     return key.strip(), secret.strip()
 
 

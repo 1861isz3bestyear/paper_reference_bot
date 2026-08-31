@@ -18,8 +18,11 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["reference_bot", "live_paper_bot", "real_bot", "server_bot"]
+testpaths = ["reference_bot", "live_paper_bot", "real_bot", "bybit_demo_bot", "server_bot"]
 python_files = ["test_*.py"]
 
 [tool.coverage.run]
 omit = ["*/test_*.py"]
+
+[tool.coverage.report]
+fail_under = 80

@@ -21,6 +21,14 @@ cp paper_bot_config.example.json paper_bot_config.json
 nvim paper_bot_config.json
 ```
 
+Mainnet Bybit credentials for the read-only account fee-rate request are loaded from
+`bybitapi.env` by both paper bots:
+
+```bash
+cp bybitapi.env.example bybitapi.env
+chmod 600 bybitapi.env
+```
+
 ## Combined commands
 
 ```bash
@@ -50,6 +58,57 @@ Create two systemd services with the same working directory and config path, one
 The reference bot writes `reference_*` files. The live-paper bot writes `live_paper_*` files. `reset` deletes both bots' runtime data but retains the shared configuration and logs.
 
 Neither bot submits real exchange orders. Bybit credentials are used only for the read-only fee-rate endpoint. MEXC uses public market and fee data.
+
+## Bybit demo-account executor
+
+`bybit_demo_bot` runs the same shared strategy configuration against Bybit Demo Trading at
+`https://api-demo.bybit.com`. It owns separate state and instance-lock files and does not
+depend on either paper process. Use API credentials created inside Bybit's Demo Trading
+environment in `bybitapi.env` (Bybit Testnet keys are not compatible).
+
+Run it directly in the foreground:
+
+```bash
+uv run python -m bybit_demo_bot.cli run --resume \
+  --config ./paper_bot_config.json --env ./bybitapi.env
+```
+
+The equivalent combined CLI command is:
+
+```bash
+uv run python -m server_bot.cli run-bybit-demo --resume \
+  --config ./paper_bot_config.json --env ./bybitapi.env
+```
+
+The bot requires a non-reversed `Bybit REST` / `BTC_USDT` configuration. It reads completed
+Bybit candles, calculates the same target side as `live_paper_bot`, sizes entries from
+`initial_capital`, and reconciles the demo account with market orders. Every entry is
+followed by an exchange-side stop loss; failure to install it triggers an emergency close
+and halts further trading.
+
+Example systemd service:
+
+```ini
+[Unit]
+Description=Server Bot Bybit demo executor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/opt/server_bot
+ExecStart=/usr/local/bin/uv run python -m bybit_demo_bot.cli run --resume --config /opt/server_bot/paper_bot_config.json --env /opt/server_bot/bybitapi.env
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
 
 ## Real-money MEXC executor
 
