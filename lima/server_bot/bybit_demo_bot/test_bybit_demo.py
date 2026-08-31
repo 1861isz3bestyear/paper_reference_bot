@@ -61,9 +61,13 @@ def test_client_public_and_private_helpers(monkeypatch):
     assert client.available_usdt() == 50
     assert client.position("BTCUSDT")["side"] == "Buy"
     assert client.market_order("BTCUSDT", "Buy", Decimal(".01")) == "abc"
-    client.set_protection("BTCUSDT", Decimal("99"))
+    client.set_protection("BTCUSDT", Decimal("99"), Decimal("110"))
     assert requests[-1].full_url.startswith("https://api-demo.bybit.com/v5/position/trading-stop")
     assert requests[-1].headers["X-bapi-sign"]
+    assert json.loads(requests[-1].data) == {
+        "category": "linear", "symbol": "BTCUSDT", "positionIdx": 0, "tpslMode": "Full",
+        "stopLoss": "99", "takeProfit": "110", "slOrderType": "Market", "tpOrderType": "Market",
+    }
 
 
 def test_client_rejects_api_errors_and_missing_rows(monkeypatch):
@@ -73,6 +77,22 @@ def test_client_rejects_api_errors_and_missing_rows(monkeypatch):
     monkeypatch.setattr(client_module, "urlopen", lambda *_a, **_k: Response({"retCode": 0, "result": {"list": []}}))
     with pytest.raises(BybitDemoError, match="no instrument"):
         BybitDemoClient("k", "s").instruments("BTCUSDT")
+
+
+def test_client_accepts_idempotent_protection_not_modified(monkeypatch):
+    monkeypatch.setattr(client_module, "urlopen", lambda *_a, **_k: Response({
+        "retCode": 34040, "retMsg": "not modified", "result": {},
+    }))
+    client = BybitDemoClient("k", "s")
+    client.set_protection("XRPUSDT", Decimal("0.50"), Decimal("0.60"))
+
+
+def test_client_still_rejects_real_protection_errors(monkeypatch):
+    monkeypatch.setattr(client_module, "urlopen", lambda *_a, **_k: Response({
+        "retCode": 10001, "retMsg": "invalid take profit", "result": {},
+    }))
+    with pytest.raises(BybitDemoError, match="invalid take profit"):
+        BybitDemoClient("k", "s").set_protection("XRPUSDT", Decimal("0.50"), Decimal("0.60"))
 
 
 def test_bot_validates_config_and_sizes(monkeypatch, tmp_path):
@@ -114,12 +134,38 @@ def test_reconcile_opens_then_protects(monkeypatch, tmp_path):
     candle = pd.DataFrame([{"time": pd.Timestamp("2026-01-01T00:00:00Z")}, {"time": pd.Timestamp("2026-01-01T00:01:00Z")}])
     monkeypatch.setattr("bybit_demo_bot.cli.fetch_completed_linear_klines", lambda *_: candle)
     monkeypatch.setattr("bybit_demo_bot.cli.calculate_strategy_decision", lambda *_: Mock(side="Long"))
+    monkeypatch.setattr(BybitDemoBot, "_exit_band", lambda *_: Decimal("110"))
     bot = BybitDemoBot(config(anchor_before_strategy_start=True, anchor_before_days=1), client, state)
     now = datetime(2026, 1, 1, 0, 2, 30, tzinfo=timezone.utc)
     assert "opened Buy" in bot.reconcile_once(now)
     assert state.pending_protection_side == "Buy"
+    assert state.pending_take_profit == "110"
     assert "protected" in bot.reconcile_once(now)
-    client.set_protection.assert_called_once()
+    client.set_protection.assert_called_once_with("BTCUSDT", Decimal("99.600"), Decimal("110"))
+
+
+def test_exit_band_matches_configured_strategy_close_sigma(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "STATE_FILE", tmp_path / "state.json")
+    rows = pd.DataFrame([{"anchored_vwap": 100.0, "anchored_std": 5.0}])
+    monkeypatch.setattr(cli, "add_launch_weekly_anchored_vwap", lambda *_: rows)
+    launched = pd.Timestamp("2026-01-01T00:00:00Z")
+    bot = BybitDemoBot(config(close_order_vwap_sigma=2), Mock(), DemoState.load_or_create(False))
+    assert bot._exit_band(pd.DataFrame([{}]), launched, "Buy") == Decimal("110.0")
+    assert bot._exit_band(pd.DataFrame([{}]), launched, "Sell") == Decimal("90.0")
+
+
+def test_existing_position_refreshes_tp_to_latest_close_band(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "STATE_FILE", tmp_path / "state.json")
+    client = Mock()
+    client.position.return_value = {"side": "Buy", "size": "1", "avgPrice": "100"}
+    candles = pd.DataFrame([{"time": pd.Timestamp("2026-01-01T00:01:00Z")}])
+    monkeypatch.setattr(cli, "fetch_completed_linear_klines", lambda *_: candles)
+    monkeypatch.setattr(cli, "calculate_strategy_decision", lambda *_: Mock(side="Long"))
+    monkeypatch.setattr(BybitDemoBot, "_exit_band", lambda *_: Decimal("112"))
+    bot = BybitDemoBot(config(), client, DemoState("2026-01-01T00:00:00+00:00"))
+    result = bot.reconcile_once(datetime(2026, 1, 1, 0, 2, 30, tzinfo=timezone.utc))
+    assert result == "updated Buy protection to current VWAP close band"
+    client.set_protection.assert_called_once_with("BTCUSDT", Decimal("99.600"), Decimal("112"))
 
 
 def test_reconcile_closes_opposite_position(monkeypatch, tmp_path):
@@ -144,6 +190,7 @@ def test_reconcile_reverses_position_with_reduce_only_close_first(monkeypatch, t
     candles = pd.DataFrame([{"time": pd.Timestamp("2026-01-01T00:01:00Z")}])
     monkeypatch.setattr(cli, "fetch_completed_linear_klines", lambda *_: candles)
     monkeypatch.setattr(cli, "calculate_strategy_decision", lambda *_: Mock(side="Long"))
+    monkeypatch.setattr(BybitDemoBot, "_exit_band", lambda *_: Decimal("3"))
     bot = BybitDemoBot(config(ticker="XRP_USDT"), client, DemoState("2026-01-01T00:00:00+00:00"))
     result = bot.reconcile_once(datetime(2026, 1, 1, 0, 2, 30, tzinfo=timezone.utc))
     assert result == "closed Sell; opened Buy; awaiting fill for protection"
@@ -173,7 +220,7 @@ def test_protection_failure_emergency_closes_and_halts(monkeypatch, tmp_path):
     client = Mock()
     client.position.return_value = position
     client.set_protection.side_effect = BybitDemoError("no protection")
-    state = DemoState("2026-01-01T00:00:00+00:00", pending_protection_side="Buy")
+    state = DemoState("2026-01-01T00:00:00+00:00", pending_protection_side="Buy", pending_take_profit="110")
     bot = BybitDemoBot(config(), client, state)
     with pytest.raises(RuntimeError, match="emergency close submitted"):
         bot.reconcile_once()
@@ -188,7 +235,7 @@ def test_protection_and_emergency_close_failure_persists_halt(monkeypatch, tmp_p
     client.position.return_value = {"side": "Buy", "size": "1", "avgPrice": "100"}
     client.set_protection.side_effect = BybitDemoError("protection rejected")
     client.market_order.side_effect = BybitDemoError("close rejected")
-    state = DemoState("2026-01-01T00:00:00+00:00", pending_protection_side="Buy")
+    state = DemoState("2026-01-01T00:00:00+00:00", pending_protection_side="Buy", pending_take_profit="110")
     with pytest.raises(RuntimeError, match="emergency close failed"):
         BybitDemoBot(config(), client, state).reconcile_once()
     assert "emergency close failed" in (state.halted_reason or "")

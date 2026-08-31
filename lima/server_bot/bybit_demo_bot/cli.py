@@ -19,6 +19,7 @@ from live_paper_bot.cli import calculate_strategy_decision
 from live_paper_bot.market import fetch_completed_linear_klines
 from reference_bot.config import BYBIT_TICKERS, PAPER_BOT_CONFIG_FILE, PaperBotConfig
 from real_bot.cli import load_env, setting
+from shared.indicators import add_launch_weekly_anchored_vwap
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = ROOT / "bybitapidemo.env"
@@ -32,6 +33,7 @@ class DemoState:
     launched_at: str
     last_processed_candle: str | None = None
     pending_protection_side: str | None = None
+    pending_take_profit: str | None = None
     halted_reason: str | None = None
 
     @classmethod
@@ -77,13 +79,27 @@ class BybitDemoBot:
             raise RuntimeError("Bybit demo order is below configured or exchange minimum")
         return quantity
 
-    def _protect(self, position: dict[str, object]) -> str:
+    def _exit_band(self, candles: pd.DataFrame, launched: pd.Timestamp, side: str) -> Decimal:
+        anchor = launched - timedelta(days=self.config.anchor_before_days) if self.config.anchor_before_strategy_start else launched
+        row = add_launch_weekly_anchored_vwap(candles, anchor, self.config.vwap_anchor_reset_weeks).iloc[-1]
+        vwap, std = Decimal(str(row["anchored_vwap"])), Decimal(str(row["anchored_std"]))
+        sigma = Decimal(str(self.config.close_order_vwap_sigma))
+        if pd.isna(row["anchored_vwap"]) or pd.isna(row["anchored_std"]):
+            raise RuntimeError("VWAP close band is unavailable for take profit")
+        if self.config.trend:
+            return vwap + std * sigma if side == "Buy" else vwap - std * sigma
+        return vwap - std * sigma if side == "Buy" else vwap + std * sigma
+
+    def _protect(self, position: dict[str, object], take_profit: Decimal) -> str:
         side = str(position["side"])
         entry = Decimal(str(position["avgPrice"]))
         loss = Decimal(str(self.config.stop_loss_pct)) / 100
         stop = entry * (1 - loss if side == "Buy" else 1 + loss)
-        self.client.set_protection(self.symbol, stop)
+        if (side == "Buy" and take_profit <= entry) or (side == "Sell" and take_profit >= entry):
+            raise RuntimeError(f"VWAP close-band take profit {take_profit} is not profitable from {side} entry {entry}")
+        self.client.set_protection(self.symbol, stop, take_profit)
         self.state.pending_protection_side = None
+        self.state.pending_take_profit = None
         self.state.save()
         return f"{side} position protected"
 
@@ -93,7 +109,9 @@ class BybitDemoBot:
         position = self.client.position(self.symbol)
         if self.state.pending_protection_side and position:
             try:
-                return self._protect(position)
+                if self.state.pending_take_profit is None:
+                    raise RuntimeError("pending VWAP take-profit price is missing")
+                return self._protect(position, Decimal(self.state.pending_take_profit))
             except Exception as exc:
                 try:
                     self.client.market_order(self.symbol, "Sell" if position["side"] == "Buy" else "Buy", Decimal(str(position["size"])), reduce_only=True)
@@ -127,9 +145,13 @@ class BybitDemoBot:
         if desired and not position:
             price = self.client.last_price(self.symbol)
             self.state.pending_protection_side = desired
+            self.state.pending_take_profit = format(self._exit_band(candles, launched, desired), "f")
             self.state.save()
             self.client.market_order(self.symbol, desired, self._quantity(price))
             actions.append(f"opened {desired}; awaiting fill for protection")
+        elif position and desired == existing:
+            self._protect(position, self._exit_band(candles, launched, desired))
+            actions.append(f"updated {desired} protection to current VWAP close band")
         self.state.last_processed_candle = latest.isoformat()
         self.state.save()
         return "; ".join(actions) or None

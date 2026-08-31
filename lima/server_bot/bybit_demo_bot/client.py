@@ -88,8 +88,15 @@ class BybitDemoClient:
             raise BybitDemoError("Bybit demo returned no order ID")
         return str(order_id)
 
-    def set_protection(self, symbol: str, stop_loss: Decimal) -> None:
-        self._request("POST", "/v5/position/trading-stop", {
-            "category": "linear", "symbol": symbol, "positionIdx": 0, "tpslMode": "Full",
-            "stopLoss": format(stop_loss, "f"), "slOrderType": "Market",
-        })
+    def set_protection(self, symbol: str, stop_loss: Decimal, take_profit: Decimal) -> None:
+        try:
+            self._request("POST", "/v5/position/trading-stop", {
+                "category": "linear", "symbol": symbol, "positionIdx": 0, "tpslMode": "Full",
+                "stopLoss": format(stop_loss, "f"), "takeProfit": format(take_profit, "f"),
+                "slOrderType": "Market", "tpOrderType": "Market",
+            })
+        except BybitDemoError as exc:
+            # Bybit uses an error retCode for an idempotent protection update.
+            # Existing exchange-side SL/TP is already the requested protection.
+            if "not modified" not in str(exc).lower():
+                raise
