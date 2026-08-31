@@ -64,20 +64,25 @@ Neither bot submits real exchange orders. Bybit credentials are used only for th
 `bybit_demo_bot` runs the same shared strategy configuration against Bybit Demo Trading at
 `https://api-demo.bybit.com`. It owns separate state and instance-lock files and does not
 depend on either paper process. Use API credentials created inside Bybit's Demo Trading
-environment in `bybitapi.env` (Bybit Testnet keys are not compatible).
+environment in `bybitapidemo.env` (Bybit Testnet keys are not compatible):
+
+```bash
+cp bybitapidemo.env.example bybitapidemo.env
+chmod 600 bybitapidemo.env
+```
 
 Run it directly in the foreground:
 
 ```bash
 uv run python -m bybit_demo_bot.cli run --resume \
-  --config ./paper_bot_config.json --env ./bybitapi.env
+  --config ./paper_bot_config.json --env ./bybitapidemo.env
 ```
 
 The equivalent combined CLI command is:
 
 ```bash
 uv run python -m server_bot.cli run-bybit-demo --resume \
-  --config ./paper_bot_config.json --env ./bybitapi.env
+  --config ./paper_bot_config.json --env ./bybitapidemo.env
 ```
 
 The paper bots and demo bot support non-reversed `Bybit REST` configurations for
@@ -101,7 +106,7 @@ Wants=network-online.target
 Type=simple
 User=bot
 WorkingDirectory=/opt/server_bot
-ExecStart=/usr/local/bin/uv run python -m bybit_demo_bot.cli run --resume --config /opt/server_bot/paper_bot_config.json --env /opt/server_bot/bybitapi.env
+ExecStart=/usr/local/bin/uv run python -m bybit_demo_bot.cli run --resume --config /opt/server_bot/paper_bot_config.json --env /opt/server_bot/bybitapidemo.env
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=30

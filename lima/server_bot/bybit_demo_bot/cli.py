@@ -21,7 +21,7 @@ from reference_bot.config import BYBIT_TICKERS, PAPER_BOT_CONFIG_FILE, PaperBotC
 from real_bot.cli import load_env, setting
 
 ROOT = Path(__file__).resolve().parents[1]
-ENV_FILE = ROOT / "bybitapi.env"
+ENV_FILE = ROOT / "bybitapidemo.env"
 STATE_FILE = ROOT / "bybit_demo_state.json"
 LOCK_FILE = ROOT / "bybit_demo_bot.instance.lock"
 INTERVAL_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}

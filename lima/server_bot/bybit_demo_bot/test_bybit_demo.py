@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from decimal import Decimal
-from io import BytesIO
 from unittest.mock import Mock
+from urllib.error import URLError
 
 import pandas as pd
 import pytest
@@ -89,6 +89,20 @@ def test_bot_validates_config_and_sizes(monkeypatch, tmp_path):
         bot._quantity(Decimal("1000"))
 
 
+def test_quantity_obeys_exchange_notional_step_and_available_balance(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "STATE_FILE", tmp_path / "state.json")
+    client = Mock()
+    client.instruments.return_value = {"lotSizeFilter": {
+        "qtyStep": "1", "minOrderQty": "1", "minNotionalValue": "5",
+    }}
+    client.available_usdt.return_value = Decimal("8")
+    bot = BybitDemoBot(config(ticker="XRP_USDT", initial_capital=100), client, DemoState.load_or_create(False))
+    assert bot._quantity(Decimal("2")) == Decimal("3")  # 98% balance cap, then floor to whole XRP.
+    client.available_usdt.return_value = Decimal("6")
+    with pytest.raises(RuntimeError, match="minimum"):
+        bot._quantity(Decimal("2"))
+
+
 def test_reconcile_opens_then_protects(monkeypatch, tmp_path):
     monkeypatch.setattr("bybit_demo_bot.cli.STATE_FILE", tmp_path / "state.json")
     state = DemoState("2026-01-01T00:00:00+00:00")
@@ -118,6 +132,23 @@ def test_reconcile_closes_opposite_position(monkeypatch, tmp_path):
     bot = BybitDemoBot(config(), client, DemoState("2026-01-01T00:00:00+00:00"))
     assert bot.reconcile_once(datetime(2026, 1, 1, 0, 2, 10, tzinfo=timezone.utc)) == "closed Sell"
     client.market_order.assert_called_once_with("BTCUSDT", "Buy", Decimal("0.02"), reduce_only=True)
+
+
+def test_reconcile_reverses_position_with_reduce_only_close_first(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "STATE_FILE", tmp_path / "state.json")
+    client = Mock()
+    client.position.return_value = {"side": "Sell", "size": "2", "avgPrice": "2"}
+    client.last_price.return_value = Decimal("2")
+    client.available_usdt.return_value = Decimal("100")
+    client.instruments.return_value = {"lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "minNotionalValue": "5"}}
+    candles = pd.DataFrame([{"time": pd.Timestamp("2026-01-01T00:01:00Z")}])
+    monkeypatch.setattr(cli, "fetch_completed_linear_klines", lambda *_: candles)
+    monkeypatch.setattr(cli, "calculate_strategy_decision", lambda *_: Mock(side="Long"))
+    bot = BybitDemoBot(config(ticker="XRP_USDT"), client, DemoState("2026-01-01T00:00:00+00:00"))
+    result = bot.reconcile_once(datetime(2026, 1, 1, 0, 2, 30, tzinfo=timezone.utc))
+    assert result == "closed Sell; opened Buy; awaiting fill for protection"
+    assert client.market_order.call_args_list[0].kwargs == {"reduce_only": True}
+    assert client.market_order.call_args_list[1].kwargs == {}
 
 
 def test_state_resume_stop_and_same_candle(monkeypatch, tmp_path):
@@ -151,6 +182,19 @@ def test_protection_failure_emergency_closes_and_halts(monkeypatch, tmp_path):
         bot.reconcile_once()
 
 
+def test_protection_and_emergency_close_failure_persists_halt(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "STATE_FILE", tmp_path / "state.json")
+    client = Mock()
+    client.position.return_value = {"side": "Buy", "size": "1", "avgPrice": "100"}
+    client.set_protection.side_effect = BybitDemoError("protection rejected")
+    client.market_order.side_effect = BybitDemoError("close rejected")
+    state = DemoState("2026-01-01T00:00:00+00:00", pending_protection_side="Buy")
+    with pytest.raises(RuntimeError, match="emergency close failed"):
+        BybitDemoBot(config(), client, state).reconcile_once()
+    assert "emergency close failed" in (state.halted_reason or "")
+    assert json.loads((tmp_path / "state.json").read_text())["halted_reason"] == state.halted_reason
+
+
 def test_stale_history_and_invalid_state(monkeypatch, tmp_path):
     state_path = tmp_path / "state.json"
     monkeypatch.setattr(cli, "STATE_FILE", state_path)
@@ -178,6 +222,36 @@ def test_run_demo_wires_env_config_and_lock(monkeypatch, tmp_path):
         cli.run_demo_command(config_path, env_path, poll_seconds=0)
 
 
+def test_demo_default_env_name_and_credentials_are_wired_without_network(monkeypatch, tmp_path):
+    assert cli.ENV_FILE.name == "bybitapidemo.env"
+    config_path = tmp_path / "config.json"
+    config_path.write_text(config().to_json(), encoding="utf-8")
+    env_path = tmp_path / "bybitapidemo.env"
+    env_path.write_text("# demo only\nBYBIT_API_KEY='demo-key'\nBYBIT_API_SECRET=demo-secret\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "LOCK_FILE", tmp_path / "lock")
+    monkeypatch.setattr(cli, "STATE_FILE", tmp_path / "state.json")
+    client_factory = Mock(return_value=Mock())
+    monkeypatch.setattr(cli, "BybitDemoClient", client_factory)
+    monkeypatch.setattr(cli.BybitDemoBot, "run", Mock())
+    cli.run_demo_command(config_path, env_path)
+    client_factory.assert_called_once_with("demo-key", "demo-secret")
+
+
+@pytest.mark.parametrize("contents, message", [
+    ("BYBIT_API_SECRET=s\n", "BYBIT_API_KEY"),
+    ("BYBIT_API_KEY=k\n", "BYBIT_API_SECRET"),
+    ("BYBIT_API_KEY=\nBYBIT_API_SECRET=s\n", "BYBIT_API_KEY"),
+])
+def test_demo_rejects_missing_or_blank_credentials(monkeypatch, tmp_path, contents, message):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(config().to_json(), encoding="utf-8")
+    env_path = tmp_path / "bybitapidemo.env"
+    env_path.write_text(contents, encoding="utf-8")
+    monkeypatch.setattr(cli, "LOCK_FILE", tmp_path / "lock")
+    with pytest.raises(ValueError, match=message):
+        cli.run_demo_command(config_path, env_path)
+
+
 def test_client_missing_ticker_position_and_order_id(monkeypatch):
     payloads = iter([
         {"retCode": 0, "result": {"list": []}},
@@ -191,3 +265,29 @@ def test_client_missing_ticker_position_and_order_id(monkeypatch):
     assert client.position("BTCUSDT") is None
     with pytest.raises(BybitDemoError, match="no order ID"):
         client.market_order("BTCUSDT", "Buy", Decimal("1"))
+
+
+def test_client_wraps_transport_and_invalid_json_errors(monkeypatch):
+    monkeypatch.setattr(client_module, "urlopen", Mock(side_effect=URLError("offline")))
+    with pytest.raises(BybitDemoError, match="request failed"):
+        BybitDemoClient("k", "s").last_price("BTCUSDT")
+
+    bad = Mock()
+    bad.__enter__ = Mock(return_value=bad)
+    bad.__exit__ = Mock(return_value=None)
+    bad.read.return_value = b"not-json"
+    monkeypatch.setattr(client_module, "urlopen", Mock(return_value=bad))
+    with pytest.raises(BybitDemoError, match="request failed"):
+        BybitDemoClient("k", "s").last_price("BTCUSDT")
+
+
+def test_client_never_targets_mainnet_and_signs_post_body(monkeypatch):
+    captured = []
+    monkeypatch.setattr(client_module.time, "time", lambda: 1234.567)
+    monkeypatch.setattr(client_module, "urlopen", lambda request, timeout: captured.append(request) or Response({"retCode": 0, "result": {"orderId": "id"}}))
+    BybitDemoClient("demo-key", "demo-secret").market_order("XRPUSDT", "Buy", Decimal("2"))
+    request = captured[0]
+    assert request.full_url == "https://api-demo.bybit.com/v5/order/create"
+    assert request.full_url != "https://api.bybit.com/v5/order/create"
+    assert request.headers["X-bapi-api-key"] == "demo-key"
+    assert request.headers["X-bapi-sign"]

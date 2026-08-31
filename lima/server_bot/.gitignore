@@ -1,6 +1,9 @@
 .env
 mexcapi.env
 bybitapi.env
+bybitapidemo.env
+bybitdemoapi.env
+bybit_demo.env
 *.pid
 *.log
 *.instance.lock
