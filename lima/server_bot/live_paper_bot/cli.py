@@ -32,6 +32,7 @@ from live_paper_bot.market import (
 from live_paper_bot.trading import (
     PAPER_ACCOUNT_FILE,
     LocalPaperTrader,
+    fetch_bybit_order_limits,
     fetch_bybit_taker_fee_rate,
     latest_strategy_side,
     load_bybit_credentials,
@@ -335,7 +336,14 @@ class PaperBot:
                     )
                     if allocation < self.config.minimum_order_size:
                         target_side = None
-                target = self.trader.build_target(self.trade_symbol, target_side, execution_price, allocation)
+                limits = (
+                    fetch_bybit_order_limits(self.market_symbol)
+                    if self.config.data_source == "Bybit REST" and self.market_symbol != "BTCUSDT" else None
+                )
+                target = self.trader.build_target(
+                    self.trade_symbol, target_side, execution_price, allocation,
+                    **({"quantity_step": limits[0], "minimum_quantity": limits[1], "exchange_minimum_notional": limits[2]} if limits else {}),
+                )
                 action = self.trader.reconcile(
                     self.trade_symbol,
                     target,

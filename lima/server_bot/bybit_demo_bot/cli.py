@@ -17,7 +17,7 @@ import requests
 from bybit_demo_bot.client import BybitDemoClient, BybitDemoError
 from live_paper_bot.cli import calculate_strategy_decision
 from live_paper_bot.market import fetch_completed_linear_klines
-from reference_bot.config import PAPER_BOT_CONFIG_FILE, PaperBotConfig
+from reference_bot.config import BYBIT_TICKERS, PAPER_BOT_CONFIG_FILE, PaperBotConfig
 from real_bot.cli import load_env, setting
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,8 +53,8 @@ class DemoState:
 
 class BybitDemoBot:
     def __init__(self, config: PaperBotConfig, client: BybitDemoClient, state: DemoState) -> None:
-        if config.data_source != "Bybit REST" or config.reverse_ticker or config.ticker != "BTC_USDT":
-            raise ValueError("Bybit demo requires non-reversed Bybit REST BTC_USDT configuration")
+        if config.data_source != "Bybit REST" or config.reverse_ticker or config.ticker not in BYBIT_TICKERS:
+            raise ValueError(f"Bybit demo requires a non-reversed Bybit REST ticker from {sorted(BYBIT_TICKERS)}")
         self.config, self.client, self.state = config, client, state
         self.symbol, self.running = config.ticker.replace("_", ""), True
 
@@ -69,9 +69,11 @@ class BybitDemoBot:
         info = self.client.instruments(self.symbol)
         limits = info["lotSizeFilter"]
         step, minimum = Decimal(str(limits["qtyStep"])), Decimal(str(limits["minOrderQty"]))
+        minimum_notional = Decimal(str(limits.get("minNotionalValue", "0")))
         allocation = min(Decimal(str(self.config.initial_capital)), self.client.available_usdt() * Decimal("0.98"))
         quantity = self._floor(allocation / price, step)
-        if quantity < minimum or quantity * price < Decimal(str(self.config.minimum_order_size)):
+        required_notional = max(minimum_notional, Decimal(str(self.config.minimum_order_size)))
+        if quantity < minimum or quantity * price < required_notional:
             raise RuntimeError("Bybit demo order is below configured or exchange minimum")
         return quantity
 

@@ -6,6 +6,7 @@ import hmac
 import fcntl
 import os
 import time
+from functools import lru_cache
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -23,6 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PAPER_ACCOUNT_FILE = PROJECT_ROOT / "live_paper_account.json"
 BYBIT_ENV_FILES = (PROJECT_ROOT / "bybitapi.env",)
 BYBIT_FEE_RATE_URL = "https://api.bybit.com/v5/account/fee-rate"
+BYBIT_INSTRUMENTS_URL = "https://api.bybit.com/v5/market/instruments-info"
 BTC_QUANTITY_STEP = Decimal("0.001")
 
 
@@ -107,6 +109,33 @@ def fetch_bybit_taker_fee_rate(
     return rate
 
 
+@lru_cache(maxsize=32)
+def fetch_bybit_order_limits(symbol: str) -> tuple[Decimal, Decimal, Decimal]:
+    """Return quantity step, minimum quantity, and minimum notional for a linear contract."""
+    response = requests.get(
+        BYBIT_INSTRUMENTS_URL,
+        params={"category": "linear", "symbol": symbol},
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("retCode") != 0:
+        raise RuntimeError(f"Bybit instrument request failed: {payload.get('retMsg', 'unknown error')}")
+    rows = payload.get("result", {}).get("list", [])
+    if not rows:
+        raise RuntimeError(f"Bybit returned no instrument limits for {symbol}.")
+    limits = rows[0].get("lotSizeFilter", {})
+    try:
+        step = Decimal(str(limits["qtyStep"]))
+        minimum = Decimal(str(limits["minOrderQty"]))
+        minimum_notional = Decimal(str(limits.get("minNotionalValue", "0")))
+    except (KeyError, ValueError) as exc:
+        raise RuntimeError(f"Bybit returned invalid instrument limits for {symbol}.") from exc
+    if step <= 0 or minimum <= 0 or minimum_notional < 0:
+        raise RuntimeError(f"Bybit returned invalid instrument limits for {symbol}.")
+    return step, minimum, minimum_notional
+
+
 def latest_strategy_side(trades: list[Trade], final_candle_time: pd.Timestamp) -> str | None:
     """Return the position held before the backtest's artificial end-of-range close."""
     if not trades:
@@ -175,15 +204,26 @@ class LocalPaperTrader:
         except OSError as exc:
             raise RuntimeError(f"Could not write local paper account {self.account_path.name}: {exc}") from exc
 
-    def build_target(self, symbol: str, side: str | None, price: float, notional: float) -> PaperTradeTarget:
+    def build_target(
+        self, symbol: str, side: str | None, price: float, notional: float, *,
+        quantity_step: Decimal = BTC_QUANTITY_STEP,
+        minimum_quantity: Decimal = BTC_QUANTITY_STEP,
+        exchange_minimum_notional: Decimal = Decimal("0"),
+    ) -> PaperTradeTarget:
         if side not in {None, "Long", "Short"}:
             raise ValueError("Target side must be Long, Short, or flat.")
         if price <= 0 or notional <= 0:
             raise ValueError("Price and paper allocation must be positive.")
         raw_quantity = Decimal(str(notional)) / Decimal(str(price))
-        quantity = (raw_quantity / BTC_QUANTITY_STEP).to_integral_value(rounding=ROUND_DOWN) * BTC_QUANTITY_STEP
-        if side is not None and quantity < BTC_QUANTITY_STEP:
-            raise ValueError(f"Paper allocation is too small; minimum {symbol} quantity is {BTC_QUANTITY_STEP}.")
+        if quantity_step <= 0 or minimum_quantity <= 0 or exchange_minimum_notional < 0:
+            raise ValueError("Exchange order limits must be valid.")
+        quantity = (raw_quantity / quantity_step).to_integral_value(rounding=ROUND_DOWN) * quantity_step
+        if side is not None and (quantity < minimum_quantity or quantity * Decimal(str(price)) < exchange_minimum_notional):
+            required = max(exchange_minimum_notional, minimum_quantity * Decimal(str(price)))
+            raise ValueError(
+                f"Paper allocation is too small; {symbol} requires at least {minimum_quantity} units "
+                f"and approximately {required} quote notional."
+            )
         return PaperTradeTarget(side=side, price=price, quantity=quantity)
 
     def current_position(self, symbol: str) -> LocalPosition:

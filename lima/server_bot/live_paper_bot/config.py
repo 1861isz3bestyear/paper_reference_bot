@@ -10,7 +10,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PAPER_BOT_CONFIG_FILE = PROJECT_ROOT / "paper_bot_config.json"
 SUPPORTED_TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d"}
 SUPPORTED_DATA_SOURCES = {"Bybit REST", "MEXC REST"}
-SUPPORTED_TICKERS = {"BTC_USDT", "SHIB_USDT", "VET_USDT", "VED_USDT"}
+BYBIT_TICKERS = {"BTC_USDT", "XRP_USDT", "DOGE_USDT", "ADA_USDT", "TRX_USDT", "LINK_USDT", "AVAX_USDT", "DOT_USDT", "TON_USDT", "NEAR_USDT"}
+MEXC_TICKERS = {"BTC_USDT", "SHIB_USDT", "VET_USDT", "VED_USDT"}
+SUPPORTED_TICKERS = BYBIT_TICKERS | MEXC_TICKERS
 
 
 @dataclass(frozen=True)
@@ -71,8 +73,10 @@ class PaperBotConfig:
             raise ValueError(f"Paper bot data source must be one of {sorted(SUPPORTED_DATA_SOURCES)}.")
         if self.ticker not in SUPPORTED_TICKERS:
             raise ValueError(f"Paper bot ticker must be one of {sorted(SUPPORTED_TICKERS)}.")
-        if self.data_source == "Bybit REST" and self.ticker != "BTC_USDT":
-            raise ValueError("The Bybit paper bot currently supports only BTC_USDT.")
+        if self.data_source == "Bybit REST" and self.ticker not in BYBIT_TICKERS:
+            raise ValueError(f"The Bybit paper bot supports only {sorted(BYBIT_TICKERS)}.")
+        if self.data_source == "MEXC REST" and self.ticker not in MEXC_TICKERS:
+            raise ValueError(f"The MEXC paper bot supports only {sorted(MEXC_TICKERS)}.")
         if not isinstance(self.reverse_ticker, bool):
             raise ValueError("Reverse ticker must be true or false.")
         if self.open_position_side not in {"Long", "Short", "Both"}:

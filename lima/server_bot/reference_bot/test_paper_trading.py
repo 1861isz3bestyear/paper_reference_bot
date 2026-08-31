@@ -8,11 +8,29 @@ from unittest.mock import Mock
 import pandas as pd
 import pytest
 
-from reference_bot.trading import LocalPaperTrader, fetch_bybit_taker_fee_rate, latest_strategy_side
+from reference_bot.trading import LocalPaperTrader, fetch_bybit_order_limits, fetch_bybit_taker_fee_rate, latest_strategy_side
 from shared.models import Trade
 
 
 class TestPaperTrading:
+    def test_fetches_symbol_specific_bybit_order_limits(self, monkeypatch) -> None:
+        response = Mock()
+        response.json.return_value = {"retCode": 0, "result": {"list": [{"lotSizeFilter": {
+            "qtyStep": "1", "minOrderQty": "1", "minNotionalValue": "5",
+        }}]}}
+        get = Mock(return_value=response)
+        monkeypatch.setattr("reference_bot.trading.requests.get", get)
+        fetch_bybit_order_limits.cache_clear()
+        assert fetch_bybit_order_limits("XRPUSDT") == (Decimal("1"), Decimal("1"), Decimal("5"))
+        assert get.call_args.kwargs["params"]["symbol"] == "XRPUSDT"
+
+    def test_build_target_uses_symbol_specific_limits(self) -> None:
+        target = LocalPaperTrader(Path("unused.json")).build_target(
+            "XRPUSDT", "Long", 2.5, 14,
+            quantity_step=Decimal("1"), minimum_quantity=Decimal("1"), exchange_minimum_notional=Decimal("5"),
+        )
+        assert target.quantity == Decimal("5")
+
     def test_paper_strategy_start_is_persisted_independently(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             trader = LocalPaperTrader(Path(directory) / "account.json")
