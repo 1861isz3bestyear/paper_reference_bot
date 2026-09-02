@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install, manage, verify, and diagnose the three user systemd bot services."""
+"""Install, manage, verify, and diagnose selectable user systemd bot services."""
 
 from __future__ import annotations
 
@@ -14,7 +14,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
-SERVICE_NAMES = ("paper-bot-reference.service", "paper-bot-live.service", "bybit-demo.service")
+ENTITY_SERVICES = {
+    "reference": "paper-bot-reference.service",
+    "paper": "paper-bot-live.service",
+    "demo": "bybit-demo.service",
+    "bybit": "bybit-mainnet.service",
+}
+ENTITY_MARKERS = {
+    "reference": "reference_bot.cli",
+    "paper": "live_paper_bot.cli",
+    "demo": "run-bybit-demo",
+    "bybit": "run-bybit-mainnet",
+}
+ENTITY_NAMES = tuple(ENTITY_SERVICES)
+DEFAULT_ENTITY_NAMES = ("reference", "paper", "demo")
+SERVICE_NAMES = tuple(ENTITY_SERVICES.values())
 SECRET_PATTERN = re.compile(
     r"(?im)^([^\n=]*(?:api[_ -]?(?:key|secret)|authorization|bearer)[^\n=]*=)[^\n]*$"
 )
@@ -27,6 +41,7 @@ class Layout:
     config: Path
     paper_env: Path
     demo_env: Path
+    bybit_env: Path
     unit_dir: Path
 
 
@@ -44,16 +59,38 @@ def resolve_layout(project: Path | None = None, uv: Path | None = None) -> Layou
         config=root / "paper_bot_config.json",
         paper_env=root / "bybitapi.env",
         demo_env=root / "bybitapidemo.env",
+        bybit_env=root / "bybitrealapi.env",
         unit_dir=Path.home() / ".config/systemd/user",
     )
 
 
-def validate_layout(layout: Layout) -> None:
-    required = (layout.project / "pyproject.toml", layout.config, layout.paper_env, layout.demo_env)
+def selected_entities(entities: Sequence[str] | None = None) -> tuple[str, ...]:
+    selected = tuple(entities or DEFAULT_ENTITY_NAMES)
+    unknown = sorted(set(selected) - set(ENTITY_NAMES))
+    if unknown:
+        raise ValueError("Unknown service entities: " + ", ".join(unknown))
+    return tuple(dict.fromkeys(selected))
+
+
+def service_names(entities: Sequence[str] | None = None) -> tuple[str, ...]:
+    return tuple(ENTITY_SERVICES[name] for name in selected_entities(entities))
+
+
+def validate_layout(layout: Layout, entities: Sequence[str] | None = None) -> None:
+    selected = selected_entities(entities)
+    required = [layout.project / "pyproject.toml", layout.config]
+    credential_paths = []
+    if {"reference", "paper"} & set(selected):
+        credential_paths.append(layout.paper_env)
+    if "demo" in selected:
+        credential_paths.append(layout.demo_env)
+    if "bybit" in selected:
+        credential_paths.append(layout.bybit_env)
+    required.extend(credential_paths)
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise RuntimeError("Missing required file(s): " + ", ".join(missing))
-    insecure = [str(path) for path in (layout.paper_env, layout.demo_env) if path.stat().st_mode & 0o077]
+    insecure = [str(path) for path in credential_paths if path.is_file() and path.stat().st_mode & 0o077]
     if insecure:
         raise RuntimeError("Credential file permissions must be 600: " + ", ".join(insecure))
 
@@ -87,6 +124,11 @@ def unit_contents(layout: Layout) -> dict[str, str]:
             f"{_quote(layout.uv)} run python -m server_bot.cli run-bybit-demo --resume "
             f"--config {_quote(layout.config)} --env {_quote(layout.demo_env)}",
         ),
+        "bybit-mainnet.service": (
+            "Bybit mainnet bot (REAL FUNDS)",
+            f"{_quote(layout.uv)} run python -m server_bot.cli run-bybit-mainnet --confirm-live --resume "
+            f"--config {_quote(layout.config)} --env {_quote(layout.bybit_env)}",
+        ),
     }
     return {
         name: f"[Unit]\nDescription={description}\n{common}ExecStart={command}\n{suffix}"
@@ -98,40 +140,47 @@ def run(command: Sequence[str], *, check: bool = True, capture_output: bool = Fa
     return subprocess.run(command, check=check, text=True, capture_output=capture_output)
 
 
-def install(layout: Layout, runner: Runner = run, *, start: bool = True) -> None:
-    validate_layout(layout)
+def install(layout: Layout, runner: Runner = run, *, start: bool = True, entities: Sequence[str] | None = None) -> None:
+    selected = selected_entities(entities)
+    names = service_names(selected)
+    validate_layout(layout, selected)
     layout.unit_dir.mkdir(parents=True, exist_ok=True)
-    for name, contents in unit_contents(layout).items():
+    units = unit_contents(layout)
+    for name in names:
+        contents = units[name]
         (layout.unit_dir / name).write_text(contents, encoding="utf-8")
-    runner(["systemd-analyze", "--user", "verify", *(str(layout.unit_dir / n) for n in SERVICE_NAMES)])
+    runner(["systemd-analyze", "--user", "verify", *(str(layout.unit_dir / n) for n in names)])
     runner(["systemctl", "--user", "daemon-reload"])
-    runner(["systemctl", "--user", "enable", *SERVICE_NAMES])
+    runner(["systemctl", "--user", "enable", *names])
     if start:
-        runner(["systemctl", "--user", "start", *SERVICE_NAMES])
+        runner(["systemctl", "--user", "start", *names])
 
 
-def services_action(action: str, runner: Runner = run) -> None:
-    runner(["systemctl", "--user", action, *SERVICE_NAMES])
+def services_action(action: str, runner: Runner = run, entities: Sequence[str] | None = None) -> None:
+    runner(["systemctl", "--user", action, *service_names(entities)])
 
 
-def uninstall(layout: Layout, runner: Runner = run) -> None:
-    runner(["systemctl", "--user", "disable", "--now", *SERVICE_NAMES], check=False)
-    for name in SERVICE_NAMES:
+def uninstall(layout: Layout, runner: Runner = run, entities: Sequence[str] | None = None) -> None:
+    names = service_names(entities)
+    runner(["systemctl", "--user", "disable", "--now", *names], check=False)
+    for name in names:
         (layout.unit_dir / name).unlink(missing_ok=True)
     runner(["systemctl", "--user", "daemon-reload"])
 
 
-def check_services(runner: Runner = run) -> bool:
+def check_services(runner: Runner = run, entities: Sequence[str] | None = None) -> bool:
+    selected = selected_entities(entities)
+    names = service_names(selected)
     good = True
     for state in ("is-enabled", "is-active"):
-        result = runner(["systemctl", "--user", state, *SERVICE_NAMES], check=False, capture_output=True)
+        result = runner(["systemctl", "--user", state, *names], check=False, capture_output=True)
         if result.returncode:
             good = False
             output = (result.stdout + result.stderr).strip()
             if output:
                 print(output)
     processes = runner(
-        ["pgrep", "-af", "reference_bot.cli|live_paper_bot.cli|run-bybit-demo"],
+        ["pgrep", "-af", "|".join(ENTITY_MARKERS[name] for name in selected)],
         check=False,
         capture_output=True,
     )
@@ -140,7 +189,7 @@ def check_services(runner: Runner = run) -> bool:
         for line in processes.stdout.splitlines()
         if line.strip() and "uv run " not in line
     ]
-    for marker in ("reference_bot.cli", "live_paper_bot.cli", "run-bybit-demo"):
+    for marker in (ENTITY_MARKERS[name] for name in selected):
         count = sum(marker in line for line in lines)
         if count != 1:
             print(f"Expected exactly one {marker} process, found {count}.")
@@ -157,18 +206,19 @@ def _capture(runner: Runner, command: Sequence[str]) -> str:
     return redact(result.stdout + result.stderr)
 
 
-def collect_logs(layout: Layout, output_dir: Path, runner: Runner = run, *, since: str = "7 days ago") -> Path:
+def collect_logs(layout: Layout, output_dir: Path, runner: Runner = run, *, since: str = "7 days ago", entities: Sequence[str] | None = None) -> Path:
+    names = service_names(entities)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     report = output_dir / f"bot-diagnostics-{stamp}"
     report.mkdir(parents=True, exist_ok=False)
-    for service in SERVICE_NAMES:
+    for service in names:
         contents = _capture(
             runner,
             ["journalctl", "--user-unit", service, "--since", since, "--no-pager", "-o", "short-iso-precise"],
         )
         (report / f"{service}.log").write_text(contents, encoding="utf-8")
     commands = {
-        "services-status.txt": ["systemctl", "--user", "status", *SERVICE_NAMES, "--no-pager"],
+        "services-status.txt": ["systemctl", "--user", "status", *names, "--no-pager"],
         "bot-status.txt": [str(layout.uv), "run", "--project", str(layout.project), "python", "-m",
                            "server_bot.cli", "status", "--config", str(layout.config)],
         "bot-stats.txt": [str(layout.uv), "run", "--project", str(layout.project), "python", "-m",
@@ -189,11 +239,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     commands = parser.add_subparsers(dest="command", required=True)
     install_parser = commands.add_parser("install")
     install_parser.add_argument("--no-start", action="store_true")
+    install_parser.add_argument("--entity", action="append", choices=ENTITY_NAMES, dest="entities")
     for command in ("start", "stop", "restart", "status", "check", "uninstall"):
-        commands.add_parser(command)
+        subparser = commands.add_parser(command)
+        subparser.add_argument("--entity", action="append", choices=ENTITY_NAMES, dest="entities")
     logs = commands.add_parser("collect-logs")
     logs.add_argument("--since", default="7 days ago")
     logs.add_argument("--output-dir", type=Path, default=Path.cwd())
+    logs.add_argument("--entity", action="append", choices=ENTITY_NAMES, dest="entities")
     return parser.parse_args(argv)
 
 
@@ -202,15 +255,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         layout = resolve_layout(args.project, args.uv)
         if args.command == "install":
-            install(layout, start=not args.no_start)
+            install(layout, start=not args.no_start, entities=args.entities)
         elif args.command in {"start", "stop", "restart", "status"}:
-            services_action(args.command)
+            services_action(args.command, entities=args.entities)
         elif args.command == "check":
-            return 0 if check_services() else 1
+            return 0 if check_services(entities=args.entities) else 1
         elif args.command == "uninstall":
-            uninstall(layout)
+            uninstall(layout, entities=args.entities)
         else:
-            print(collect_logs(layout, args.output_dir.resolve(), since=args.since))
+            print(collect_logs(layout, args.output_dir.resolve(), since=args.since, entities=args.entities))
         return 0
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

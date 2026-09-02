@@ -7,6 +7,7 @@ from pathlib import Path
 
 from real_bot.cli import ENV_FILE as REAL_ENV_FILE, run_real_command
 from bybit_demo_bot.cli import ENV_FILE as BYBIT_DEMO_ENV_FILE, run_demo_command
+from bybit_bot.cli import ENV_FILE as BYBIT_ENV_FILE, run_bybit_command
 
 from live_paper_bot.cli import (
     STATE_FILE as LIVE_STATE_FILE,
@@ -133,6 +134,12 @@ def parse_args() -> argparse.Namespace:
     demo.add_argument("--env", type=Path, default=BYBIT_DEMO_ENV_FILE)
     demo.add_argument("--resume", action="store_true")
     demo.add_argument("--poll-seconds", type=int, default=10)
+    bybit = subparsers.add_parser("run-bybit-mainnet", help="Run the real-money Bybit mainnet executor.")
+    bybit.add_argument("--confirm-live", action="store_true", help="required acknowledgement that real funds are used")
+    bybit.add_argument("--config", type=Path, default=PAPER_BOT_CONFIG_FILE)
+    bybit.add_argument("--env", type=Path, default=BYBIT_ENV_FILE)
+    bybit.add_argument("--resume", action="store_true")
+    bybit.add_argument("--poll-seconds", type=int, default=10)
     return parser.parse_args()
 
 
@@ -165,8 +172,16 @@ def main() -> None:
             max_signal_age=args.max_signal_age,
             order_lifetime_minutes=args.order_lifetime_minutes,
         )
-    else:
+    elif args.command == "run-bybit-demo":
         run_demo_command(args.config, args.env, resume=args.resume, poll_seconds=args.poll_seconds)
+    else:
+        run_bybit_command(
+            args.config,
+            args.env,
+            confirm_live=args.confirm_live,
+            resume=args.resume,
+            poll_seconds=args.poll_seconds,
+        )
 
 
 if __name__ == "__main__":

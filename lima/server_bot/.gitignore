@@ -2,8 +2,11 @@
 mexcapi.env
 bybitapi.env
 bybitapidemo.env
+bybitrealapi.env
 bybitdemoapi.env
 bybit_demo.env
+bybit_state.json*
+bybit_bot.instance.lock
 *.pid
 *.log
 *.instance.lock

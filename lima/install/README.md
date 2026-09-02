@@ -1,7 +1,7 @@
 # Bot service installer
 
-This utility manages the reference paper bot, live paper bot, and Bybit Demo bot as Debian user
-systemd services. It supports Debian 11 and Debian 12 on a VPS, physical server, or Lima VM. Both
+This utility manages the reference paper bot, live paper bot, Bybit Demo bot, and optional
+real-money Bybit mainnet bot as Debian user systemd services. It supports Debian 11 and Debian 12 on a VPS, physical server, or Lima VM. Both
 Debian releases have passed the post-install integration suite on ARM64; the installer is not
 specific to Lima.
 
@@ -91,12 +91,36 @@ uv run --project ../server_bot python bot_services.py status
 uv run --project ../server_bot python bot_services.py collect-logs --since "7 days ago"
 ```
 
+With no `--entity` options, commands operate on the safe default set: `reference`, `paper`, and
+`demo`. Select one or more explicitly by repeating the option:
+
+```bash
+# Install only the two paper services.
+uv run --project ../server_bot python bot_services.py install \
+  --entity reference --entity paper
+
+# Install only Demo Trading.
+uv run --project ../server_bot python bot_services.py install --entity demo
+
+# Explicitly install the real-money Bybit mainnet service.
+uv run --project ../server_bot python bot_services.py install --entity bybit
+
+# Manage or inspect the same subset.
+uv run --project ../server_bot python bot_services.py status --entity demo --entity bybit
+uv run --project ../server_bot python bot_services.py collect-logs \
+  --entity demo --entity bybit --since "1 day ago"
+```
+
+Valid entities are `reference`, `paper`, `demo`, and `bybit`. Real-money Bybit is deliberately
+excluded from the default set and can only be installed or started when `--entity bybit` is
+given explicitly.
+
 Before installation, stop processes launched with the legacy background command or tmux. The
-installer validates the unit files, enables all three services, and starts them with `--resume`.
+installer validates the selected unit files, enables the selected services, and starts them with `--resume`.
 It never resets bot state.
 
 Other commands are `start`, `stop`, `restart`, and `uninstall`. `collect-logs` creates a timestamped
-`.tar.gz` containing all three journals, service status, bot status, and statistics. Credential-like
+`.tar.gz` containing the selected journals, service status, bot status, and statistics. Credential-like
 assignments in captured output are redacted.
 
 The installer deliberately renders an unquoted absolute `WorkingDirectory`, ignores the `uv run`
@@ -134,6 +158,8 @@ Debian does not need a special `.env`. The existing application files are used d
 - `../server_bot/bybitapi.env`: read-only mainnet Bybit key used by both simulated paper bots to
   retrieve account fee rates.
 - `../server_bot/bybitapidemo.env`: Bybit Demo Trading key used for demo orders.
+- `../server_bot/bybitrealapi.env`: dedicated Bybit mainnet trading key used only by the
+  explicitly selected real-money service. Disable withdrawals on this key.
 
 Create them from their `.example` files and restrict permissions with `chmod 600`. Do not use
 Testnet credentials for the Demo Trading service.

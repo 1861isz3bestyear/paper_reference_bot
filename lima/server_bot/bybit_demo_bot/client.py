@@ -23,6 +23,8 @@ class BybitDemoClient:
     base_url: str = "https://api-demo.bybit.com"
     timeout: float = 20.0
     recv_window: str = "5000"
+    environment_name: str = "Bybit demo"
+    user_agent: str = "server-bot-bybit-demo/1.0"
 
     def _request(self, method: str, path: str, values: dict[str, Any] | None = None) -> dict[str, Any]:
         values = values or {}
@@ -41,31 +43,31 @@ class BybitDemoClient:
             "X-BAPI-RECV-WINDOW": self.recv_window,
             "X-BAPI-SIGN": signature,
             "Content-Type": "application/json",
-            "User-Agent": "server-bot-bybit-demo/1.0",
+            "User-Agent": self.user_agent,
         })
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 payload = json.loads(response.read().decode())
         except HTTPError as exc:
-            raise BybitDemoError(f"Bybit demo HTTP {exc.code}: {exc.read().decode(errors='replace')[:500]}") from None
+            raise BybitDemoError(f"{self.environment_name} HTTP {exc.code}: {exc.read().decode(errors='replace')[:500]}") from None
         except (URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise BybitDemoError(f"Bybit demo request failed: {exc}") from None
+            raise BybitDemoError(f"{self.environment_name} request failed: {exc}") from None
         if not isinstance(payload, dict) or payload.get("retCode") != 0:
             message = payload.get("retMsg", "unexpected response") if isinstance(payload, dict) else "unexpected response"
-            raise BybitDemoError(f"Bybit demo {method} {path} API error: {message}")
+            raise BybitDemoError(f"{self.environment_name} {method} {path} API error: {message}")
         result = payload.get("result", {})
         return result if isinstance(result, dict) else {}
 
     def instruments(self, symbol: str) -> dict[str, Any]:
         rows = self._request("GET", "/v5/market/instruments-info", {"category": "linear", "symbol": symbol}).get("list", [])
         if not rows:
-            raise BybitDemoError(f"Bybit demo returned no instrument data for {symbol}")
+            raise BybitDemoError(f"{self.environment_name} returned no instrument data for {symbol}")
         return rows[0]
 
     def last_price(self, symbol: str) -> Decimal:
         rows = self._request("GET", "/v5/market/tickers", {"category": "linear", "symbol": symbol}).get("list", [])
         if not rows:
-            raise BybitDemoError(f"Bybit demo returned no ticker for {symbol}")
+            raise BybitDemoError(f"{self.environment_name} returned no ticker for {symbol}")
         return Decimal(str(rows[0]["lastPrice"]))
 
     def available_usdt(self) -> Decimal:
@@ -85,7 +87,7 @@ class BybitDemoClient:
         })
         order_id = result.get("orderId")
         if not order_id:
-            raise BybitDemoError("Bybit demo returned no order ID")
+            raise BybitDemoError(f"{self.environment_name} returned no order ID")
         return str(order_id)
 
     def set_protection(self, symbol: str, stop_loss: Decimal, take_profit: Decimal) -> None:

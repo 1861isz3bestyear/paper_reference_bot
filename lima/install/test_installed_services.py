@@ -29,7 +29,7 @@ def layout() -> bot_services.Layout:
 
 
 def test_generated_units_are_valid_and_use_resume(layout: bot_services.Layout) -> None:
-    unit_paths = [layout.unit_dir / name for name in bot_services.SERVICE_NAMES]
+    unit_paths = [layout.unit_dir / name for name in bot_services.service_names()]
     assert all(path.is_file() for path in unit_paths)
     command("systemd-analyze", "--user", "verify", *(str(path) for path in unit_paths))
 
@@ -48,7 +48,7 @@ def test_generated_units_are_valid_and_use_resume(layout: bot_services.Layout) -
 
 def test_all_services_are_enabled_active_and_unique() -> None:
     for state in ("is-enabled", "is-active"):
-        result = command("systemctl", "--user", state, *bot_services.SERVICE_NAMES)
+        result = command("systemctl", "--user", state, *bot_services.service_names())
         assert all(line.strip() in {"enabled", "active"} for line in result.stdout.splitlines())
     assert bot_services.check_services()
 
@@ -75,7 +75,7 @@ def test_diagnostic_archive_contains_every_service(layout: bot_services.Layout, 
     assert archive.is_file()
     with tarfile.open(archive, "r:gz") as bundle:
         names = bundle.getnames()
-    for service in bot_services.SERVICE_NAMES:
+    for service in bot_services.service_names():
         assert any(name.endswith(f"/{service}.log") for name in names)
     assert any(name.endswith("/services-status.txt") for name in names)
     assert any(name.endswith("/bot-status.txt") for name in names)

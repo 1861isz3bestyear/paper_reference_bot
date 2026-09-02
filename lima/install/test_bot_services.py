@@ -22,14 +22,15 @@ class FakeRunner:
 def layout(tmp_path):
     project = tmp_path / "server_bot"
     project.mkdir()
-    for name in ("pyproject.toml", "paper_bot_config.json", "bybitapi.env", "bybitapidemo.env"):
+    for name in ("pyproject.toml", "paper_bot_config.json", "bybitapi.env", "bybitapidemo.env", "bybitrealapi.env"):
         (project / name).write_text("x", encoding="utf-8")
     (project / "bybitapi.env").chmod(0o600)
     (project / "bybitapidemo.env").chmod(0o600)
+    (project / "bybitrealapi.env").chmod(0o600)
     uv = tmp_path / "uv"
     uv.touch()
     return services.Layout(project, uv, project / "paper_bot_config.json", project / "bybitapi.env",
-                           project / "bybitapidemo.env", tmp_path / "units")
+                           project / "bybitapidemo.env", project / "bybitrealapi.env", tmp_path / "units")
 
 
 def test_resolve_layout_and_missing_uv(monkeypatch, tmp_path):
@@ -66,6 +67,7 @@ def test_units_have_safe_expected_commands(layout):
     assert "reference_bot.cli run --resume" in units["paper-bot-reference.service"]
     assert "live_paper_bot.cli run --resume" in units["paper-bot-live.service"]
     assert "run-bybit-demo --resume" in units["bybit-demo.service"]
+    assert "run-bybit-mainnet --confirm-live --resume" in units["bybit-mainnet.service"]
     for text in units.values():
         assert "Restart=on-failure" in text and "KillSignal=SIGINT" in text
         assert f"WorkingDirectory={layout.project}" in text
@@ -76,7 +78,8 @@ def test_units_have_safe_expected_commands(layout):
 def test_install_writes_verifies_enables_and_optionally_starts(layout):
     runner = FakeRunner()
     services.install(layout, runner)
-    assert all((layout.unit_dir / name).is_file() for name in services.SERVICE_NAMES)
+    assert all((layout.unit_dir / name).is_file() for name in services.service_names())
+    assert not (layout.unit_dir / "bybit-mainnet.service").exists()
     assert runner.calls[0][0][:3] == ["systemd-analyze", "--user", "verify"]
     assert runner.calls[-2][0][2] == "enable"
     assert runner.calls[-1][0][2] == "start"
@@ -85,12 +88,30 @@ def test_install_writes_verifies_enables_and_optionally_starts(layout):
     assert not any(call[0][2:3] == ["start"] for call in runner.calls)
 
 
+def test_install_selected_entities_validates_only_their_credentials(layout):
+    layout.demo_env.unlink()
+    layout.bybit_env.unlink()
+    runner = FakeRunner()
+    services.install(layout, runner, entities=("reference", "paper"))
+    assert (layout.unit_dir / "paper-bot-reference.service").is_file()
+    assert (layout.unit_dir / "paper-bot-live.service").is_file()
+    assert not (layout.unit_dir / "bybit-demo.service").exists()
+    assert runner.calls[-1][0][-2:] == ["paper-bot-reference.service", "paper-bot-live.service"]
+
+
+def test_entity_selection_helpers_reject_unknown_and_deduplicate():
+    assert services.selected_entities(("demo", "demo")) == ("demo",)
+    assert services.service_names(("bybit",)) == ("bybit-mainnet.service",)
+    with pytest.raises(ValueError, match="Unknown"):
+        services.selected_entities(("wrong",))
+
+
 def test_service_action_and_uninstall(layout):
     runner = FakeRunner()
     services.services_action("restart", runner)
-    assert runner.calls[0][0] == ["systemctl", "--user", "restart", *services.SERVICE_NAMES]
+    assert runner.calls[0][0] == ["systemctl", "--user", "restart", *services.service_names()]
     layout.unit_dir.mkdir(exist_ok=True)
-    for name in services.SERVICE_NAMES:
+    for name in services.service_names():
         (layout.unit_dir / name).touch()
     services.uninstall(layout, runner)
     assert not any(layout.unit_dir.iterdir())
@@ -105,6 +126,8 @@ def test_check_services_success_and_failures(capsys):
         "4 live_paper_bot.cli\n"
         "5 uv run python -m server_bot.cli run-bybit-demo\n"
         "6 run-bybit-demo\n"
+        "7 uv run python -m server_bot.cli run-bybit-mainnet\n"
+        "8 run-bybit-mainnet\n"
     )
     okay = FakeRunner([CompletedProcess([], 0, "", ""), CompletedProcess([], 0, "", ""),
                        CompletedProcess([], 0, processes, "")])
@@ -123,7 +146,7 @@ def test_redact_and_collect_logs(layout, tmp_path, monkeypatch):
     monkeypatch.setattr(services, "datetime", type("Clock", (), {
         "now": staticmethod(lambda _: type("Now", (), {"strftime": lambda self, _: "STAMP"})())
     }))
-    runner = FakeRunner([CompletedProcess([], 0, "BYBIT_API_KEY=secret\n", "")] * 6)
+    runner = FakeRunner([CompletedProcess([], 0, "BYBIT_API_KEY=secret\n", "")] * 7)
     archive = services.collect_logs(layout, tmp_path, runner, since="1 hour ago")
     assert archive.name == "bot-diagnostics-STAMP.tar.gz" and archive.is_file()
     report = tmp_path / "bot-diagnostics-STAMP"
@@ -138,21 +161,21 @@ def test_redact_and_collect_logs(layout, tmp_path, monkeypatch):
 def test_main_service_actions(monkeypatch, command):
     seen = []
     monkeypatch.setattr(services, "resolve_layout", lambda *_: object())
-    monkeypatch.setattr(services, "services_action", seen.append)
-    assert services.main([command]) == 0 and seen == [command]
+    monkeypatch.setattr(services, "services_action", lambda action, entities: seen.append((action, entities)))
+    assert services.main([command]) == 0 and seen == [(command, None)]
 
 
 def test_main_other_branches_and_error(monkeypatch, tmp_path, capsys):
     layout = object()
     monkeypatch.setattr(services, "resolve_layout", lambda *_: layout)
     installed = []
-    monkeypatch.setattr(services, "install", lambda value, start: installed.append((value, start)))
-    assert services.main(["install", "--no-start"]) == 0 and installed == [(layout, False)]
-    monkeypatch.setattr(services, "check_services", lambda: False)
+    monkeypatch.setattr(services, "install", lambda value, start, entities: installed.append((value, start, entities)))
+    assert services.main(["install", "--no-start", "--entity", "bybit"]) == 0 and installed == [(layout, False, ["bybit"])]
+    monkeypatch.setattr(services, "check_services", lambda entities: False)
     assert services.main(["check"]) == 1
     removed = []
-    monkeypatch.setattr(services, "uninstall", removed.append)
-    assert services.main(["uninstall"]) == 0 and removed == [layout]
+    monkeypatch.setattr(services, "uninstall", lambda value, entities: removed.append((value, entities)))
+    assert services.main(["uninstall"]) == 0 and removed == [(layout, None)]
     archive = tmp_path / "report.tar.gz"
     monkeypatch.setattr(services, "collect_logs", lambda *args, **kwargs: archive)
     assert services.main(["collect-logs", "--output-dir", str(tmp_path)]) == 0

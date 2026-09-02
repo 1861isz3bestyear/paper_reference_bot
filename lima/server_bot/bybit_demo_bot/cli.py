@@ -54,6 +54,9 @@ class DemoState:
 
 
 class BybitDemoBot:
+    EXECUTOR_NAME = "Bybit DEMO"
+    ACCOUNT_NAME = "Bybit demo"
+
     def __init__(self, config: PaperBotConfig, client: BybitDemoClient, state: DemoState) -> None:
         if config.data_source != "Bybit REST" or config.reverse_ticker or config.ticker not in BYBIT_TICKERS:
             raise ValueError(f"Bybit demo requires a non-reversed Bybit REST ticker from {sorted(BYBIT_TICKERS)}")
@@ -79,7 +82,7 @@ class BybitDemoBot:
         quantity = self._floor(allocation / price, step)
         required_notional = max(minimum_notional, Decimal(str(self.config.minimum_order_size)))
         if quantity < minimum or quantity * price < required_notional:
-            raise RuntimeError("Bybit demo order is below configured or exchange minimum")
+            raise RuntimeError(f"{self.ACCOUNT_NAME} order is below configured or exchange minimum")
         return quantity
 
     def _exit_band(self, candles: pd.DataFrame, launched: pd.Timestamp, side: str) -> Decimal:
@@ -162,7 +165,7 @@ class BybitDemoBot:
     def run(self, poll_seconds: int) -> None:
         signal.signal(signal.SIGTERM, self.stop)
         signal.signal(signal.SIGINT, self.stop)
-        print(f"Bybit DEMO executor started: {self.symbol}", flush=True)
+        print(f"{self.EXECUTOR_NAME} executor started: {self.symbol}", flush=True)
         while self.running:
             try:
                 action = self.reconcile_once()

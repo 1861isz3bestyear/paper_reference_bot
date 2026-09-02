@@ -9,7 +9,7 @@ Both bots receive identical strategy and market settings. Their ledgers, cursors
 
 ## Install
 
-For Debian user-systemd installation of all three bots and automated diagnostic archives, use the
+For selectable Debian user-systemd installation and automated diagnostic archives, use the
 centralized [`../install`](../install/README.md) utility.
 
 ```bash
@@ -102,6 +102,45 @@ emergency close and halts further trading.
 
 Use the centralized [`../install`](../install/README.md) utility for the supported user-systemd
 service; do not maintain a separate hand-written unit.
+
+## Real-money Bybit executor
+
+`bybit_bot` uses the same strategy, 90%-of-available-USDT sizing, reconciliation, and mandatory
+exchange-side protection mechanics as `bybit_demo_bot`, but sends orders to Bybit mainnet at
+`https://api.bybit.com`. Its credentials, state, and instance lock are isolated from Demo Trading.
+
+Create a dedicated trading key with withdrawals disabled:
+
+```bash
+cp bybitrealapi.env.example bybitrealapi.env
+chmod 600 bybitrealapi.env
+nvim bybitrealapi.env
+```
+
+Run it manually only with explicit live-funds confirmation:
+
+```bash
+uv run python -m bybit_bot.cli run --confirm-live --resume \
+  --config ./paper_bot_config.json --env ./bybitrealapi.env
+```
+
+The combined CLI equivalent is:
+
+```bash
+uv run python -m server_bot.cli run-bybit-mainnet --confirm-live --resume \
+  --config ./paper_bot_config.json --env ./bybitrealapi.env
+```
+
+Install only its systemd service explicitly; it is never part of the installer's default safe set:
+
+```bash
+cd ../install
+uv run --project ../server_bot python bot_services.py install --entity bybit
+```
+
+The service is named `bybit-mainnet.service`. Treat this executor as real-money software: validate
+the configuration and API permissions, start with a small funded balance, and monitor its first
+entry and protection orders directly at Bybit.
 
 ## Real-money MEXC executor
 
