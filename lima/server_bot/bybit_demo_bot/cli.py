@@ -72,7 +72,10 @@ class BybitDemoBot:
         limits = info["lotSizeFilter"]
         step, minimum = Decimal(str(limits["qtyStep"])), Decimal(str(limits["minOrderQty"]))
         minimum_notional = Decimal(str(limits.get("minNotionalValue", "0")))
-        allocation = min(Decimal(str(self.config.initial_capital)), self.client.available_usdt() * Decimal("0.98"))
+        # Size the funded demo account from its live available USDT instead of
+        # the paper strategy's initial capital. Keep 10% in reserve for fees,
+        # funding, losses, and exchange rounding.
+        allocation = self.client.available_usdt() * Decimal("0.90")
         quantity = self._floor(allocation / price, step)
         required_notional = max(minimum_notional, Decimal(str(self.config.minimum_order_size)))
         if quantity < minimum or quantity * price < required_notional:

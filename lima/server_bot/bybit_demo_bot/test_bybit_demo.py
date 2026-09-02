@@ -101,7 +101,7 @@ def test_bot_validates_config_and_sizes(monkeypatch, tmp_path):
     client.instruments.return_value = {"lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001"}}
     client.available_usdt.return_value = Decimal("100")
     bot = BybitDemoBot(config(), client, DemoState.load_or_create(False))
-    assert bot._quantity(Decimal("1000")) == Decimal("0.010")
+    assert bot._quantity(Decimal("1000")) == Decimal("0.090")
     with pytest.raises(ValueError, match="requires"):
         BybitDemoBot(config(data_source="MEXC REST"), client, bot.state)
     client.available_usdt.return_value = Decimal("0")
@@ -116,8 +116,8 @@ def test_quantity_obeys_exchange_notional_step_and_available_balance(monkeypatch
         "qtyStep": "1", "minOrderQty": "1", "minNotionalValue": "5",
     }}
     client.available_usdt.return_value = Decimal("8")
-    bot = BybitDemoBot(config(ticker="XRP_USDT", initial_capital=100), client, DemoState.load_or_create(False))
-    assert bot._quantity(Decimal("2")) == Decimal("3")  # 98% balance cap, then floor to whole XRP.
+    bot = BybitDemoBot(config(ticker="XRP_USDT", initial_capital=1), client, DemoState.load_or_create(False))
+    assert bot._quantity(Decimal("2")) == Decimal("3")  # 90% of balance, then floor to whole XRP.
     client.available_usdt.return_value = Decimal("6")
     with pytest.raises(RuntimeError, match="minimum"):
         bot._quantity(Decimal("2"))

@@ -92,7 +92,8 @@ The paper bots and demo bot support non-reversed `Bybit REST` configurations for
 `BTC_USDT`, `XRP_USDT`, `DOGE_USDT`, `ADA_USDT`, `TRX_USDT`, `LINK_USDT`, `AVAX_USDT`,
 `DOT_USDT`, `TON_USDT`, and `NEAR_USDT`. The demo bot reads completed
 Bybit candles, calculates the same target side as `live_paper_bot`, sizes entries from
-`initial_capital` using the selected contract's live quantity and notional limits, and
+90% of the demo account's available USDT using the selected contract's live quantity and
+notional limits, and
 reconciles the demo account with market orders. Every entry is
 followed by exchange-side stop-loss and take-profit protection. The take-profit price is
 the configured `close_order_vwap_sigma` band and is refreshed after every completed candle
