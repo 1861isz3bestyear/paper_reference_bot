@@ -18,7 +18,7 @@ from bybit_demo_bot.client import BybitDemoClient, BybitDemoError
 from live_paper_bot.cli import calculate_strategy_decision
 from live_paper_bot.market import fetch_completed_linear_klines
 from reference_bot.config import BYBIT_TICKERS, PAPER_BOT_CONFIG_FILE, PaperBotConfig
-from real_bot.cli import load_env, setting
+from shared.env import load_env, setting
 from shared.indicators import add_launch_weekly_anchored_vwap
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -10,8 +10,8 @@ from pathlib import Path
 
 from bybit_bot.client import BybitClient, BybitError
 from bybit_demo_bot.cli import BybitDemoBot
-from real_bot.cli import load_env, setting
 from reference_bot.config import PAPER_BOT_CONFIG_FILE, PaperBotConfig
+from shared.env import load_env, setting
 
 
 ROOT = Path(__file__).resolve().parents[1]

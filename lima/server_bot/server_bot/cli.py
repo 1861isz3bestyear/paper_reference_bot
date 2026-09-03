@@ -5,7 +5,6 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from real_bot.cli import ENV_FILE as REAL_ENV_FILE, run_real_command
 from bybit_demo_bot.cli import ENV_FILE as BYBIT_DEMO_ENV_FILE, run_demo_command
 from bybit_bot.cli import ENV_FILE as BYBIT_ENV_FILE, run_bybit_command
 
@@ -122,13 +121,6 @@ def parse_args() -> argparse.Namespace:
     health.add_argument("--config", type=Path, default=PAPER_BOT_CONFIG_FILE)
     health.add_argument("--stale-candles", type=int, default=10)
     health.add_argument("--paper-grace-candles", type=int, default=3)
-    real = subparsers.add_parser("run-real", help="Run the foreground MEXC real-money consensus executor.")
-    real.add_argument("--confirm-live", action="store_true", help="required acknowledgement that real funds are used")
-    real.add_argument("--config", type=Path, default=PAPER_BOT_CONFIG_FILE)
-    real.add_argument("--env", type=Path, default=REAL_ENV_FILE)
-    real.add_argument("--poll-seconds", type=int, default=10)
-    real.add_argument("--max-signal-age", type=int, default=180)
-    real.add_argument("--order-lifetime-minutes", type=int, default=10)
     demo = subparsers.add_parser("run-bybit-demo", help="Run the foreground Bybit demo-account executor.")
     demo.add_argument("--config", type=Path, default=PAPER_BOT_CONFIG_FILE)
     demo.add_argument("--env", type=Path, default=BYBIT_DEMO_ENV_FILE)
@@ -163,15 +155,6 @@ def main() -> None:
         )
         print(message)
         raise SystemExit(status)
-    elif args.command == "run-real":
-        run_real_command(
-            args.config,
-            args.env,
-            confirm_live=args.confirm_live,
-            poll_seconds=args.poll_seconds,
-            max_signal_age=args.max_signal_age,
-            order_lifetime_minutes=args.order_lifetime_minutes,
-        )
     elif args.command == "run-bybit-demo":
         run_demo_command(args.config, args.env, resume=args.resume, poll_seconds=args.poll_seconds)
     else:
