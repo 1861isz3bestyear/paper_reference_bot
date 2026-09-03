@@ -28,6 +28,10 @@ LOCK_FILE = ROOT / "bybit_demo_bot.instance.lock"
 INTERVAL_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
 
 
+class UnprofitableTakeProfit(RuntimeError):
+    """The current VWAP target is on the loss side of the actual fill."""
+
+
 @dataclass
 class DemoState:
     launched_at: str
@@ -101,13 +105,19 @@ class BybitDemoBot:
         entry = Decimal(str(position["avgPrice"]))
         loss = Decimal(str(self.config.stop_loss_pct)) / 100
         stop = entry * (1 - loss if side == "Buy" else 1 + loss)
-        if (side == "Buy" and take_profit <= entry) or (side == "Sell" and take_profit >= entry):
-            raise RuntimeError(f"VWAP close-band take profit {take_profit} is not profitable from {side} entry {entry}")
+        if not self._take_profit_is_profitable(side, entry, take_profit):
+            raise UnprofitableTakeProfit(
+                f"VWAP close-band take profit {take_profit} is not profitable from {side} entry {entry}"
+            )
         self.client.set_protection(self.symbol, stop, take_profit)
         self.state.pending_protection_side = None
         self.state.pending_take_profit = None
         self.state.save()
         return f"{side} position protected"
+
+    @staticmethod
+    def _take_profit_is_profitable(side: str, entry: Decimal, take_profit: Decimal) -> bool:
+        return take_profit > entry if side == "Buy" else take_profit < entry
 
     def reconcile_once(self, now: datetime | None = None) -> str | None:
         if self.state.halted_reason:
@@ -118,6 +128,22 @@ class BybitDemoBot:
                 if self.state.pending_take_profit is None:
                     raise RuntimeError("pending VWAP take-profit price is missing")
                 return self._protect(position, Decimal(self.state.pending_take_profit))
+            except UnprofitableTakeProfit as exc:
+                try:
+                    self.client.market_order(
+                        self.symbol,
+                        "Sell" if position["side"] == "Buy" else "Buy",
+                        Decimal(str(position["size"])),
+                        reduce_only=True,
+                    )
+                except Exception as close_exc:
+                    self.state.halted_reason = f"invalid entry protection ({exc}); emergency close failed ({close_exc})"
+                    self.state.save()
+                    raise RuntimeError(self.state.halted_reason) from exc
+                self.state.pending_protection_side = None
+                self.state.pending_take_profit = None
+                self.state.save()
+                return f"invalid entry protection ({exc}); emergency close submitted; waiting for next candle"
             except Exception as exc:
                 try:
                     self.client.market_order(self.symbol, "Sell" if position["side"] == "Buy" else "Buy", Decimal(str(position["size"])), reduce_only=True)
@@ -150,14 +176,30 @@ class BybitDemoBot:
             position = None
         if desired and not position:
             price = self.client.last_price(self.symbol)
-            self.state.pending_protection_side = desired
-            self.state.pending_take_profit = format(self._exit_band(candles, launched, desired), "f")
-            self.state.save()
-            self.client.market_order(self.symbol, desired, self._quantity(price))
-            actions.append(f"opened {desired}; awaiting fill for protection")
+            take_profit = self._exit_band(candles, launched, desired)
+            if not self._take_profit_is_profitable(desired, price, take_profit):
+                actions.append(
+                    f"skipped {desired} entry: VWAP close-band take profit {take_profit} "
+                    f"is not profitable from current price {price}"
+                )
+                desired = None
+            else:
+                self.state.pending_protection_side = desired
+                self.state.pending_take_profit = format(take_profit, "f")
+                self.state.save()
+                self.client.market_order(self.symbol, desired, self._quantity(price))
+                actions.append(f"opened {desired}; awaiting fill for protection")
         elif position and desired == existing:
-            self._protect(position, self._exit_band(candles, launched, desired))
-            actions.append(f"updated {desired} protection to current VWAP close band")
+            take_profit = self._exit_band(candles, launched, desired)
+            entry = Decimal(str(position["avgPrice"]))
+            if self._take_profit_is_profitable(desired, entry, take_profit):
+                self._protect(position, take_profit)
+                actions.append(f"updated {desired} protection to current VWAP close band")
+            else:
+                actions.append(
+                    f"kept existing {desired} protection: current VWAP close band {take_profit} "
+                    f"is not profitable from entry {entry}"
+                )
         self.state.last_processed_candle = latest.isoformat()
         self.state.save()
         return "; ".join(actions) or None

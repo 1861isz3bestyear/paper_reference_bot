@@ -168,6 +168,36 @@ def test_existing_position_refreshes_tp_to_latest_close_band(monkeypatch, tmp_pa
     client.set_protection.assert_called_once_with("BTCUSDT", Decimal("99.600"), Decimal("112"))
 
 
+def test_existing_position_keeps_protection_when_new_band_is_not_profitable(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "STATE_FILE", tmp_path / "state.json")
+    client = Mock()
+    client.position.return_value = {"side": "Sell", "size": "1", "avgPrice": "100"}
+    candles = pd.DataFrame([{"time": pd.Timestamp("2026-01-01T00:01:00Z")}])
+    monkeypatch.setattr(cli, "fetch_completed_linear_klines", lambda *_: candles)
+    monkeypatch.setattr(cli, "calculate_strategy_decision", lambda *_: Mock(side="Short"))
+    monkeypatch.setattr(BybitDemoBot, "_exit_band", lambda *_: Decimal("100.01"))
+    bot = BybitDemoBot(config(), client, DemoState("2026-01-01T00:00:00+00:00"))
+    result = bot.reconcile_once(datetime(2026, 1, 1, 0, 2, 30, tzinfo=timezone.utc))
+    assert result.startswith("kept existing Sell protection")
+    client.set_protection.assert_not_called()
+
+
+def test_skips_entry_when_target_is_already_crossed(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "STATE_FILE", tmp_path / "state.json")
+    client = Mock(position=Mock(return_value=None), last_price=Mock(return_value=Decimal("100")))
+    candles = pd.DataFrame([{"time": pd.Timestamp("2026-01-01T00:01:00Z")}])
+    monkeypatch.setattr(cli, "fetch_completed_linear_klines", lambda *_: candles)
+    monkeypatch.setattr(cli, "calculate_strategy_decision", lambda *_: Mock(side="Short"))
+    monkeypatch.setattr(BybitDemoBot, "_exit_band", lambda *_: Decimal("100.01"))
+    state = DemoState("2026-01-01T00:00:00+00:00")
+    result = BybitDemoBot(config(), client, state).reconcile_once(
+        datetime(2026, 1, 1, 0, 2, 30, tzinfo=timezone.utc)
+    )
+    assert result.startswith("skipped Sell entry")
+    assert state.last_processed_candle == "2026-01-01T00:01:00+00:00"
+    client.market_order.assert_not_called()
+
+
 def test_reconcile_closes_opposite_position(monkeypatch, tmp_path):
     monkeypatch.setattr("bybit_demo_bot.cli.STATE_FILE", tmp_path / "state.json")
     client = Mock()
@@ -227,6 +257,39 @@ def test_protection_failure_emergency_closes_and_halts(monkeypatch, tmp_path):
     client.market_order.assert_called_once_with("BTCUSDT", "Sell", Decimal("0.01"), reduce_only=True)
     with pytest.raises(RuntimeError, match="trading halted"):
         bot.reconcile_once()
+
+
+def test_unprofitable_fill_emergency_closes_without_permanent_halt(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "STATE_FILE", tmp_path / "state.json")
+    position = {"side": "Sell", "size": "7.5", "avgPrice": "1.3197"}
+    client = Mock(position=Mock(return_value=position))
+    state = DemoState(
+        "2026-01-01T00:00:00+00:00",
+        last_processed_candle="2026-01-01T00:01:00+00:00",
+        pending_protection_side="Sell",
+        pending_take_profit="1.319761476",
+    )
+    result = BybitDemoBot(config(), client, state).reconcile_once()
+    assert "emergency close submitted; waiting for next candle" in result
+    client.market_order.assert_called_once_with("BTCUSDT", "Buy", Decimal("7.5"), reduce_only=True)
+    assert state.halted_reason is None
+    assert state.pending_protection_side is None and state.pending_take_profit is None
+
+
+def test_unprofitable_fill_halts_when_emergency_close_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "STATE_FILE", tmp_path / "state.json")
+    client = Mock(
+        position=Mock(return_value={"side": "Sell", "size": "1", "avgPrice": "100"}),
+        market_order=Mock(side_effect=BybitDemoError("close rejected")),
+    )
+    state = DemoState(
+        "2026-01-01T00:00:00+00:00",
+        pending_protection_side="Sell",
+        pending_take_profit="101",
+    )
+    with pytest.raises(RuntimeError, match="emergency close failed"):
+        BybitDemoBot(config(), client, state).reconcile_once()
+    assert state.halted_reason and "invalid entry protection" in state.halted_reason
 
 
 def test_protection_and_emergency_close_failure_persists_halt(monkeypatch, tmp_path):

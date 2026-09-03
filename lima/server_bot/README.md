@@ -100,6 +100,13 @@ the configured `close_order_vwap_sigma` band and is refreshed after every comple
 while the position remains open. Failure to install the initial protection triggers an
 emergency close and halts further trading.
 
+Before entry, the executor rejects a signal whose VWAP take-profit has already crossed the
+current price. If market slippage still puts the actual fill beyond that target, it submits an
+emergency close, clears the pending entry, and waits for the next completed candle without
+permanently halting. A failed emergency close or a genuine protection API failure still persists
+a halt for operator review. When an existing position is protected, a newly calculated band on
+the wrong side of its entry is ignored so the last valid exchange-side protection stays in place.
+
 Use the centralized [`../install`](../install/README.md) utility for the supported user-systemd
 service; do not maintain a separate hand-written unit.
 
