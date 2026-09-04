@@ -66,6 +66,7 @@ class BybitDemoBot:
             raise ValueError(f"Bybit demo requires a non-reversed Bybit REST ticker from {sorted(BYBIT_TICKERS)}")
         self.config, self.client, self.state = config, client, state
         self.symbol, self.running = config.ticker.replace("_", ""), True
+        self._candles = pd.DataFrame()
 
     def stop(self, *_: object) -> None:
         self.running = False
@@ -122,7 +123,12 @@ class BybitDemoBot:
     def reconcile_once(self, now: datetime | None = None) -> str | None:
         if self.state.halted_reason:
             raise RuntimeError(f"trading halted: {self.state.halted_reason}")
-        position = self.client.position(self.symbol)
+        # A newly submitted order must be reconciled immediately, without
+        # waiting for another completed strategy candle.
+        if self.state.pending_protection_side:
+            position = self.client.position(self.symbol)
+        else:
+            position = None
         if self.state.pending_protection_side and position:
             try:
                 if self.state.pending_take_profit is None:
@@ -163,9 +169,27 @@ class BybitDemoBot:
             return None
         launched = pd.Timestamp(self.state.launched_at)
         start = launched - timedelta(days=self.config.anchor_before_days) if self.config.anchor_before_strategy_start else launched
-        candles = fetch_completed_linear_klines(self.symbol, self.config.timeframe, int(start.timestamp() * 1000), end_ms)
+        start_ms = int(start.timestamp() * 1000)
+        request_start_ms = start_ms
+        if not self._candles.empty:
+            cached_latest_ms = int(pd.Timestamp(self._candles.iloc[-1]["time"]).timestamp() * 1000)
+            # Re-fetch one candle at the boundary so an earlier provisional
+            # response can be corrected, while avoiding a full-history burst.
+            request_start_ms = max(start_ms, cached_latest_ms - interval * 1000)
+        downloaded = fetch_completed_linear_klines(
+            self.symbol, self.config.timeframe, request_start_ms, end_ms
+        )
+        if self._candles.empty:
+            candles = downloaded
+        else:
+            candles = pd.concat((self._candles, downloaded), ignore_index=True)
+            candles = candles.drop_duplicates(subset="time", keep="last").sort_values("time").reset_index(drop=True)
+            candles = candles[pd.to_datetime(candles["time"], utc=True) >= start].reset_index(drop=True)
         if candles.empty or pd.Timestamp(candles.iloc[-1]["time"]) != latest:
             raise RuntimeError("completed Bybit candle history is not current")
+        self._candles = candles
+        if position is None:
+            position = self.client.position(self.symbol)
         decision = calculate_strategy_decision(candles, self.config, launched)
         desired = "Buy" if decision.side == "Long" else "Sell" if decision.side == "Short" else None
         existing = str(position["side"]) if position else None
@@ -208,14 +232,24 @@ class BybitDemoBot:
         signal.signal(signal.SIGTERM, self.stop)
         signal.signal(signal.SIGINT, self.stop)
         print(f"{self.EXECUTOR_NAME} executor started: {self.symbol}", flush=True)
+        retry_seconds = poll_seconds
         while self.running:
             try:
                 action = self.reconcile_once()
                 if action:
                     print(f"{datetime.now(timezone.utc).isoformat()} {action}", flush=True)
+                retry_seconds = poll_seconds
             except (BybitDemoError, requests.RequestException, RuntimeError, ValueError, KeyError) as exc:
-                print(f"{datetime.now(timezone.utc).isoformat()} no action: {exc}", flush=True)
-            deadline = time.monotonic() + poll_seconds
+                print(
+                    f"{datetime.now(timezone.utc).isoformat()} no action; retrying in "
+                    f"{retry_seconds}s: {exc}",
+                    flush=True,
+                )
+                wait_seconds = retry_seconds
+                retry_seconds = min(retry_seconds * 2, 300)
+            else:
+                wait_seconds = poll_seconds
+            deadline = time.monotonic() + wait_seconds
             while self.running and time.monotonic() < deadline:
                 time.sleep(min(1, deadline - time.monotonic()))
 

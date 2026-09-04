@@ -242,6 +242,30 @@ def test_state_resume_stop_and_same_candle(monkeypatch, tmp_path):
     latest = pd.Timestamp("2026-01-01T00:01:00Z")
     bot.state.last_processed_candle = latest.isoformat()
     assert bot.reconcile_once(datetime(2026, 1, 1, 0, 2, 30, tzinfo=timezone.utc)) is None
+    client.position.assert_not_called()
+
+
+def test_reconcile_fetches_only_incremental_candles_after_initial_history(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "STATE_FILE", tmp_path / "state.json")
+    requests = []
+
+    def fetch(_symbol, _timeframe, start_ms, end_ms):
+        requests.append((start_ms, end_ms))
+        latest_ms = end_ms // 60_000 * 60_000 - 60_000
+        return pd.DataFrame([{"time": pd.Timestamp(latest_ms, unit="ms", tz="UTC")}])
+
+    monkeypatch.setattr(cli, "fetch_completed_linear_klines", fetch)
+    monkeypatch.setattr(cli, "calculate_strategy_decision", lambda *_: Mock(side=None))
+    client = Mock(position=Mock(return_value=None))
+    state = DemoState("2026-01-01T00:00:00+00:00")
+    bot = BybitDemoBot(config(), client, state)
+
+    bot.reconcile_once(datetime(2026, 1, 1, 0, 2, 30, tzinfo=timezone.utc))
+    bot.reconcile_once(datetime(2026, 1, 1, 0, 3, 30, tzinfo=timezone.utc))
+
+    assert requests[0][0] == int(pd.Timestamp(state.launched_at).timestamp() * 1000)
+    assert requests[1][0] == int(pd.Timestamp("2026-01-01T00:00:00Z").timestamp() * 1000)
+    assert client.position.call_count == 2
 
 
 def test_protection_failure_emergency_closes_and_halts(monkeypatch, tmp_path):
