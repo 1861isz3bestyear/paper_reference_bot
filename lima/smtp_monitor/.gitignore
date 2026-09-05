@@ -1,0 +1,6 @@
+.coverage
+.pytest_cache/
+.venv/
+__pycache__/
+alert_state.json
+smtp_monitor.env

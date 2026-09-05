@@ -19,6 +19,7 @@ ENTITY_SERVICES = {
     "paper": "paper-bot-live.service",
     "demo": "bybit-demo.service",
     "bybit": "bybit-mainnet.service",
+    "smtp": "smtp-monitor.timer",
 }
 ENTITY_MARKERS = {
     "reference": "reference_bot.cli",
@@ -27,10 +28,10 @@ ENTITY_MARKERS = {
     "bybit": "run-bybit-mainnet",
 }
 ENTITY_NAMES = tuple(ENTITY_SERVICES)
-DEFAULT_ENTITY_NAMES = ("reference", "paper", "demo")
-SERVICE_NAMES = tuple(ENTITY_SERVICES.values())
+DEFAULT_ENTITY_NAMES = ("reference", "paper", "demo", "smtp")
+SERVICE_NAMES = (*tuple(ENTITY_SERVICES.values()), "smtp-monitor.service")
 SECRET_PATTERN = re.compile(
-    r"(?im)^([^\n=]*(?:api[_ -]?(?:key|secret)|authorization|bearer)[^\n=]*=)[^\n]*$"
+    r"(?im)^([^\n=]*(?:api[_ -]?(?:key|secret)|password|authorization|bearer)[^\n=]*=)[^\n]*$"
 )
 
 
@@ -43,6 +44,15 @@ class Layout:
     demo_env: Path
     bybit_env: Path
     unit_dir: Path
+    monitor_dir: Path | None = None
+
+    @property
+    def monitor_root(self) -> Path:
+        return self.monitor_dir or self.project.parent / "smtp_monitor"
+
+    @property
+    def monitor_env(self) -> Path:
+        return self.monitor_root / "smtp_monitor.env"
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -61,6 +71,7 @@ def resolve_layout(project: Path | None = None, uv: Path | None = None) -> Layou
         demo_env=root / "bybitapidemo.env",
         bybit_env=root / "bybitrealapi.env",
         unit_dir=Path.home() / ".config/systemd/user",
+        monitor_dir=root.parent / "smtp_monitor",
     )
 
 
@@ -76,6 +87,13 @@ def service_names(entities: Sequence[str] | None = None) -> tuple[str, ...]:
     return tuple(ENTITY_SERVICES[name] for name in selected_entities(entities))
 
 
+def unit_names(entities: Sequence[str] | None = None) -> tuple[str, ...]:
+    names = list(service_names(entities))
+    if "smtp" in selected_entities(entities):
+        names.insert(names.index("smtp-monitor.timer"), "smtp-monitor.service")
+    return tuple(names)
+
+
 def validate_layout(layout: Layout, entities: Sequence[str] | None = None) -> None:
     selected = selected_entities(entities)
     required = [layout.project / "pyproject.toml", layout.config]
@@ -86,6 +104,9 @@ def validate_layout(layout: Layout, entities: Sequence[str] | None = None) -> No
         credential_paths.append(layout.demo_env)
     if "bybit" in selected:
         credential_paths.append(layout.bybit_env)
+    if "smtp" in selected:
+        required.append(layout.monitor_root / "monitor.py")
+        credential_paths.append(layout.monitor_env)
     required.extend(credential_paths)
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
@@ -130,10 +151,27 @@ def unit_contents(layout: Layout) -> dict[str, str]:
             f"--config {_quote(layout.config)} --env {_quote(layout.bybit_env)}",
         ),
     }
-    return {
+    units = {
         name: f"[Unit]\nDescription={description}\n{common}ExecStart={command}\n{suffix}"
         for name, (description, command) in commands.items()
     }
+    monitor_command = (
+        f"{_quote(layout.uv)} run --project {_quote(layout.project)} python "
+        f"{_quote(layout.monitor_root / 'monitor.py')} --project {_quote(layout.project)} "
+        f"--env {_quote(layout.monitor_env)} --state {_quote(layout.monitor_root / 'alert_state.json')}"
+    )
+    units["smtp-monitor.service"] = (
+        "[Unit]\nDescription=SMTP health monitor for reference and Bybit Demo bots\n"
+        "After=network-online.target\nWants=network-online.target\n\n"
+        "[Service]\nType=oneshot\n"
+        f"WorkingDirectory={layout.project}\nExecStart={monitor_command}\n"
+    )
+    units["smtp-monitor.timer"] = (
+        "[Unit]\nDescription=Run the SMTP bot monitor every minute\n\n"
+        "[Timer]\nOnBootSec=15sec\nOnUnitActiveSec=1min\nPersistent=true\nRandomizedDelaySec=10\n"
+        "Unit=smtp-monitor.service\n\n[Install]\nWantedBy=timers.target\n"
+    )
+    return units
 
 
 def run(command: Sequence[str], *, check: bool = True, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
@@ -143,13 +181,14 @@ def run(command: Sequence[str], *, check: bool = True, capture_output: bool = Fa
 def install(layout: Layout, runner: Runner = run, *, start: bool = True, entities: Sequence[str] | None = None) -> None:
     selected = selected_entities(entities)
     names = service_names(selected)
+    files = unit_names(selected)
     validate_layout(layout, selected)
     layout.unit_dir.mkdir(parents=True, exist_ok=True)
     units = unit_contents(layout)
-    for name in names:
+    for name in files:
         contents = units[name]
         (layout.unit_dir / name).write_text(contents, encoding="utf-8")
-    runner(["systemd-analyze", "--user", "verify", *(str(layout.unit_dir / n) for n in names)])
+    runner(["systemd-analyze", "--user", "verify", *(str(layout.unit_dir / n) for n in files)])
     runner(["systemctl", "--user", "daemon-reload"])
     runner(["systemctl", "--user", "enable", *names])
     if start:
@@ -163,7 +202,7 @@ def services_action(action: str, runner: Runner = run, entities: Sequence[str] |
 def uninstall(layout: Layout, runner: Runner = run, entities: Sequence[str] | None = None) -> None:
     names = service_names(entities)
     runner(["systemctl", "--user", "disable", "--now", *names], check=False)
-    for name in names:
+    for name in unit_names(entities):
         (layout.unit_dir / name).unlink(missing_ok=True)
     runner(["systemctl", "--user", "daemon-reload"])
 
@@ -180,7 +219,7 @@ def check_services(runner: Runner = run, entities: Sequence[str] | None = None) 
             if output:
                 print(output)
     processes = runner(
-        ["pgrep", "-af", "|".join(ENTITY_MARKERS[name] for name in selected)],
+        ["pgrep", "-af", "|".join(ENTITY_MARKERS[name] for name in selected if name in ENTITY_MARKERS)],
         check=False,
         capture_output=True,
     )
@@ -189,7 +228,7 @@ def check_services(runner: Runner = run, entities: Sequence[str] | None = None) 
         for line in processes.stdout.splitlines()
         if line.strip() and "uv run " not in line
     ]
-    for marker in (ENTITY_MARKERS[name] for name in selected):
+    for marker in (ENTITY_MARKERS[name] for name in selected if name in ENTITY_MARKERS):
         count = sum(marker in line for line in lines)
         if count != 1:
             print(f"Expected exactly one {marker} process, found {count}.")
@@ -207,7 +246,7 @@ def _capture(runner: Runner, command: Sequence[str]) -> str:
 
 
 def collect_logs(layout: Layout, output_dir: Path, runner: Runner = run, *, since: str = "7 days ago", entities: Sequence[str] | None = None) -> Path:
-    names = service_names(entities)
+    names = unit_names(entities)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     report = output_dir / f"bot-diagnostics-{stamp}"
     report.mkdir(parents=True, exist_ok=False)

@@ -1,6 +1,6 @@
 # Bot service installer
 
-This utility manages the reference paper bot, live paper bot, Bybit Demo bot, and optional
+This utility manages the reference paper bot, live paper bot, Bybit Demo bot, SMTP health monitor, and optional
 real-money Bybit mainnet bot as Debian user systemd services. It supports Debian 11 and Debian 12 on a VPS, physical server, or Lima VM. Both
 Debian releases have passed the post-install integration suite on ARM64; the installer is not
 specific to Lima.
@@ -82,6 +82,18 @@ the one-time systemd/journald setup, credentials, installation, and testing desc
 
 ## Install and manage the services
 
+Configure SMTP monitoring before the default installation:
+
+```bash
+cd "$HOME/server-bot/smtp_monitor"
+cp smtp_monitor.env.example smtp_monitor.env
+chmod 600 smtp_monitor.env
+```
+
+The default installation enables `smtp-monitor.timer`. It checks bot health every minute, sends
+the first alarm after a problem persists for two minutes, repeats unresolved alarms hourly, and
+sends a recovery message. Use `--entity smtp` to manage only the monitor.
+
 Run the installer from the deployment's `install` directory:
 
 ```bash
@@ -111,7 +123,7 @@ uv run --project ../server_bot python bot_services.py collect-logs \
   --entity demo --entity bybit --since "1 day ago"
 ```
 
-Valid entities are `reference`, `paper`, `demo`, and `bybit`. Real-money Bybit is deliberately
+Valid entities are `reference`, `paper`, `demo`, `smtp`, and `bybit`. Real-money Bybit is deliberately
 excluded from the default set and can only be installed or started when `--entity bybit` is
 given explicitly.
 

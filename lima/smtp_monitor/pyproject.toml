@@ -1,0 +1,17 @@
+[project]
+name = "smtp-monitor"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[dependency-groups]
+dev = ["pytest>=8.3.0", "pytest-cov>=6.0.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test_*.py"]
+
+[tool.coverage.run]
+source = ["monitor"]
+
+[tool.coverage.report]
+fail_under = 90
