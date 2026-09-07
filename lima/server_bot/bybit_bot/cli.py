@@ -27,12 +27,17 @@ class BybitState:
     pending_protection_side: str | None = None
     pending_take_profit: str | None = None
     halted_reason: str | None = None
+    consumed_signal_side: str | None = None
 
     @classmethod
     def load_or_create(cls, resume: bool) -> "BybitState":
         if resume and STATE_FILE.is_file():
             try:
-                return cls(**json.loads(STATE_FILE.read_text(encoding="utf-8")))
+                data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+                # Old state cannot tell whether the current signal already traded.
+                if "consumed_signal_side" not in data and data.get("last_processed_candle"):
+                    data["consumed_signal_side"] = "legacy"
+                return cls(**data)
             except (OSError, TypeError, json.JSONDecodeError) as exc:
                 raise RuntimeError(f"Cannot read {STATE_FILE.name}: {exc}") from None
         state = cls(datetime.now(timezone.utc).isoformat())

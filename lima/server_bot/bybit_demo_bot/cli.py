@@ -39,12 +39,17 @@ class DemoState:
     pending_protection_side: str | None = None
     pending_take_profit: str | None = None
     halted_reason: str | None = None
+    consumed_signal_side: str | None = None
 
     @classmethod
     def load_or_create(cls, resume: bool) -> "DemoState":
         if resume and STATE_FILE.is_file():
             try:
-                return cls(**json.loads(STATE_FILE.read_text(encoding="utf-8")))
+                data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+                # Old state cannot tell whether the current signal already traded.
+                if "consumed_signal_side" not in data and data.get("last_processed_candle"):
+                    data["consumed_signal_side"] = "legacy"
+                return cls(**data)
             except (OSError, TypeError, json.JSONDecodeError) as exc:
                 raise RuntimeError(f"Cannot read {STATE_FILE.name}: {exc}") from None
         state = cls(datetime.now(timezone.utc).isoformat())
@@ -193,12 +198,21 @@ class BybitDemoBot:
         decision = calculate_strategy_decision(candles, self.config, launched)
         desired = "Buy" if decision.side == "Long" else "Sell" if decision.side == "Short" else None
         existing = str(position["side"]) if position else None
+        if self.state.consumed_signal_side == "legacy":
+            self.state.consumed_signal_side = desired
+        elif self.state.consumed_signal_side != desired:
+            self.state.consumed_signal_side = None
+        if position and existing == desired:
+            self.state.consumed_signal_side = desired
+        self.state.save()
         actions = []
         if position and existing != desired:
             self.client.market_order(self.symbol, "Sell" if existing == "Buy" else "Buy", Decimal(str(position["size"])), reduce_only=True)
             actions.append(f"closed {existing}")
             position = None
-        if desired and not position:
+        if desired and not position and self.state.consumed_signal_side == desired:
+            actions.append(f"skipped {desired} re-entry: waiting for strategy signal change")
+        elif desired and not position:
             price = self.client.last_price(self.symbol)
             take_profit = self._exit_band(candles, launched, desired)
             if not self._take_profit_is_profitable(desired, price, take_profit):
@@ -208,10 +222,14 @@ class BybitDemoBot:
                 )
                 desired = None
             else:
+                quantity = self._quantity(price)
+                # Persist before submission: an ambiguous API failure must not
+                # result in a duplicate entry on the same signal.
+                self.state.consumed_signal_side = desired
                 self.state.pending_protection_side = desired
                 self.state.pending_take_profit = format(take_profit, "f")
                 self.state.save()
-                self.client.market_order(self.symbol, desired, self._quantity(price))
+                self.client.market_order(self.symbol, desired, quantity)
                 actions.append(f"opened {desired}; awaiting fill for protection")
         elif position and desired == existing:
             take_profit = self._exit_band(candles, launched, desired)

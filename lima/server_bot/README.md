@@ -158,3 +158,13 @@ entry and protection orders directly at Bybit.
 - exit `2`: health is indeterminate because live-paper itself is stale or state is unavailable.
 
 Thresholds can be changed with `--stale-candles` and `--paper-grace-candles`. A systemd health service or timer can later use these exit codes to decide whether to restart the reference service.
+
+### Exchange-side exits and re-entry
+
+The Bybit demo and mainnet executors submit at most one entry per uninterrupted
+strategy direction. If an exchange-side stop, take-profit, or manual close leaves
+the account flat, the executor waits until the strategy becomes flat or changes
+direction before allowing another entry. This guard persists with `--resume`.
+Existing state files without the guard conservatively consume the current signal
+on upgrade, waiting for a signal change before entering. Order submission errors
+also consume the signal because the exchange may have accepted the request.

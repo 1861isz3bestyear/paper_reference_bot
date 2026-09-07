@@ -425,3 +425,59 @@ def test_client_never_targets_mainnet_and_signs_post_body(monkeypatch):
     assert request.full_url != "https://api.bybit.com/v5/order/create"
     assert request.headers["X-bapi-api-key"] == "demo-key"
     assert request.headers["X-bapi-sign"]
+
+
+@pytest.mark.parametrize("side,opposite", [("Long", "Short"), ("Short", "Long")])
+@pytest.mark.parametrize("next_signal", ["flat", "opposite"])
+def test_exchange_exit_blocks_reentry_across_restart(monkeypatch, tmp_path, side, opposite, next_signal):
+    monkeypatch.setattr(cli, "STATE_FILE", tmp_path / "state.json")
+    client = Mock()
+    client.position.return_value = None
+    client.last_price.return_value = Decimal("100")
+    signal_side = [side]
+    monkeypatch.setattr(cli, "calculate_strategy_decision", lambda *_: Mock(side=signal_side[0]))
+    monkeypatch.setattr(cli, "fetch_completed_linear_klines", lambda _s, _t, _start, end:
+                        pd.DataFrame([{"time": pd.Timestamp(end // 60000 * 60000 - 60000, unit="ms", tz="UTC")}]))
+    monkeypatch.setattr(BybitDemoBot, "_quantity", lambda *_: Decimal("1"))
+    monkeypatch.setattr(BybitDemoBot, "_exit_band", lambda _b, _c, _l, direction:
+                        Decimal("110" if direction == "Buy" else "90"))
+    bot = BybitDemoBot(config(), client, DemoState("2026-01-01T00:00:00+00:00"))
+    now = lambda minute: datetime(2026, 1, 1, 0, minute, 30, tzinfo=timezone.utc)
+    assert "opened" in bot.reconcile_once(now(2))
+    direction = "Buy" if side == "Long" else "Sell"
+    client.position.return_value = {"side": direction, "size": "1", "avgPrice": "100"}
+    assert "protected" in bot.reconcile_once(now(2))
+    client.position.return_value = None  # Exchange-side stop or take-profit filled.
+    bot = BybitDemoBot(config(), client, DemoState.load_or_create(True))
+    assert "re-entry" in bot.reconcile_once(now(3))
+    assert "re-entry" in bot.reconcile_once(now(4))
+    assert client.market_order.call_count == 1
+    signal_side[0] = None if next_signal == "flat" else opposite
+    result = bot.reconcile_once(now(5))
+    if next_signal == "flat":
+        assert result is None
+        signal_side[0] = side
+        result = bot.reconcile_once(now(6))
+    assert "opened" in result
+    assert client.market_order.call_count == 2
+
+
+@pytest.mark.parametrize("module_name", ["bybit_demo_bot.cli", "bybit_bot.cli"])
+def test_legacy_state_conservatively_consumes_current_signal(monkeypatch, tmp_path, module_name):
+    import importlib
+    module = importlib.import_module(module_name)
+    path = tmp_path / "state.json"
+    monkeypatch.setattr(module, "STATE_FILE", path)
+    path.write_text(json.dumps({"launched_at": "2026-01-01T00:00:00+00:00",
+                                "last_processed_candle": "2026-01-01T00:01:00+00:00"}))
+    state_type = module.DemoState if module is cli else module.BybitState
+    state = state_type.load_or_create(True)
+    assert state.consumed_signal_side == "legacy"
+    client = Mock(position=Mock(return_value=None))
+    monkeypatch.setattr(cli, "calculate_strategy_decision", lambda *_: Mock(side="Long"))
+    monkeypatch.setattr(cli, "fetch_completed_linear_klines", lambda *_:
+                        pd.DataFrame([{"time": pd.Timestamp("2026-01-01T00:02:00Z")}]))
+    bot = BybitDemoBot(config(), client, state)
+    assert "re-entry" in bot.reconcile_once(datetime(2026, 1, 1, 0, 3, 30, tzinfo=timezone.utc))
+    client.market_order.assert_not_called()
+    assert state_type.load_or_create(True).consumed_signal_side == "Buy"
