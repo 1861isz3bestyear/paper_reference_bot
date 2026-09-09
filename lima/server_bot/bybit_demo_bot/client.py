@@ -27,6 +27,15 @@ class BybitDemoClient:
     user_agent: str = "server-bot-bybit-demo/1.0"
 
     def _request(self, method: str, path: str, values: dict[str, Any] | None = None) -> dict[str, Any]:
+        # Only replay reads: a failed order response can still mean it executed.
+        try:
+            return self._request_once(method, path, values)
+        except BybitDemoError as exc:
+            if method != "GET" or "API error [10002]" not in str(exc):
+                raise
+            return self._request_once(method, path, values)
+
+    def _request_once(self, method: str, path: str, values: dict[str, Any] | None = None) -> dict[str, Any]:
         values = values or {}
         timestamp = str(int(time.time() * 1000))
         query = urlencode(sorted(values.items())) if method == "GET" else ""
@@ -54,7 +63,7 @@ class BybitDemoClient:
             raise BybitDemoError(f"{self.environment_name} request failed: {exc}") from None
         if not isinstance(payload, dict) or payload.get("retCode") != 0:
             message = payload.get("retMsg", "unexpected response") if isinstance(payload, dict) else "unexpected response"
-            raise BybitDemoError(f"{self.environment_name} {method} {path} API error: {message}")
+            raise BybitDemoError(f"{self.environment_name} {method} {path} API error [{payload.get('retCode') if isinstance(payload, dict) else 'unknown'}]: {message}")
         result = payload.get("result", {})
         return result if isinstance(result, dict) else {}
 

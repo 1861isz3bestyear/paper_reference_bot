@@ -28,6 +28,7 @@ class BybitState:
     pending_take_profit: str | None = None
     halted_reason: str | None = None
     consumed_signal_side: str | None = None
+    observed_position_side: str | None = None
 
     @classmethod
     def load_or_create(cls, resume: bool) -> "BybitState":

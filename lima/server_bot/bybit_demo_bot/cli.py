@@ -40,6 +40,7 @@ class DemoState:
     pending_take_profit: str | None = None
     halted_reason: str | None = None
     consumed_signal_side: str | None = None
+    observed_position_side: str | None = None
 
     @classmethod
     def load_or_create(cls, resume: bool) -> "DemoState":
@@ -108,6 +109,7 @@ class BybitDemoBot:
 
     def _protect(self, position: dict[str, object], take_profit: Decimal) -> str:
         side = str(position["side"])
+        self.state.observed_position_side = side
         entry = Decimal(str(position["avgPrice"]))
         loss = Decimal(str(self.config.stop_loss_pct)) / 100
         stop = entry * (1 - loss if side == "Buy" else 1 + loss)
@@ -195,6 +197,15 @@ class BybitDemoBot:
         self._candles = candles
         if position is None:
             position = self.client.position(self.symbol)
+        observed = str(position["side"]) if position else None
+        if self.state.observed_position_side and observed is None:
+            print(
+                f"{datetime.now(timezone.utc).isoformat()} observed {self.state.observed_position_side} "
+                "position closed on exchange; consult execution history for fill and exit reason",
+                flush=True,
+            )
+        self.state.observed_position_side = observed
+        self.state.save()
         decision = calculate_strategy_decision(candles, self.config, launched)
         desired = "Buy" if decision.side == "Long" else "Sell" if decision.side == "Short" else None
         existing = str(position["side"]) if position else None
@@ -210,6 +221,8 @@ class BybitDemoBot:
             self.client.market_order(self.symbol, "Sell" if existing == "Buy" else "Buy", Decimal(str(position["size"])), reduce_only=True)
             actions.append(f"closed {existing}")
             position = None
+            self.state.observed_position_side = None
+            self.state.save()
         if desired and not position and self.state.consumed_signal_side == desired:
             actions.append(f"skipped {desired} re-entry: waiting for strategy signal change")
         elif desired and not position:
@@ -258,15 +271,17 @@ class BybitDemoBot:
                     print(f"{datetime.now(timezone.utc).isoformat()} {action}", flush=True)
                 retry_seconds = poll_seconds
             except (BybitDemoError, requests.RequestException, RuntimeError, ValueError, KeyError) as exc:
+                if "rate limit" in str(exc).lower() or "HTTP 429" in str(exc):
+                    retry_seconds = max(retry_seconds, 60)
                 print(
-                    f"{datetime.now(timezone.utc).isoformat()} no action; retrying in "
+                    f"{datetime.now(timezone.utc).isoformat()} reconciliation error; retrying in "
                     f"{retry_seconds}s: {exc}",
                     flush=True,
                 )
                 wait_seconds = retry_seconds
                 retry_seconds = min(retry_seconds * 2, 300)
             else:
-                wait_seconds = poll_seconds
+                wait_seconds = 1 if self.state.pending_protection_side else poll_seconds
             deadline = time.monotonic() + wait_seconds
             while self.running and time.monotonic() < deadline:
                 time.sleep(min(1, deadline - time.monotonic()))

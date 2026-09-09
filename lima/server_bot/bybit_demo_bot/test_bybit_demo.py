@@ -481,3 +481,52 @@ def test_legacy_state_conservatively_consumes_current_signal(monkeypatch, tmp_pa
     assert "re-entry" in bot.reconcile_once(datetime(2026, 1, 1, 0, 3, 30, tzinfo=timezone.utc))
     client.market_order.assert_not_called()
     assert state_type.load_or_create(True).consumed_signal_side == "Buy"
+
+
+@pytest.mark.parametrize("method, count", [("GET", 2), ("POST", 1)])
+def test_timestamp_retry_only_replays_reads(monkeypatch, method, count):
+    requests = []
+    ticks = iter([1000, 1001])
+    monkeypatch.setattr(client_module.time, "time", lambda: next(ticks))
+    def respond(request, timeout):
+        requests.append(request)
+        return Response({"retCode": 10002, "retMsg": "timestamp rejected"})
+    monkeypatch.setattr(client_module, "urlopen", respond)
+    with pytest.raises(BybitDemoError, match="10002"):
+        BybitDemoClient("k", "s")._request(method, "/test")
+    assert len(requests) == count
+    if count == 2:
+        assert requests[0].headers["X-bapi-timestamp"] != requests[1].headers["X-bapi-timestamp"]
+
+
+@pytest.mark.parametrize("pending, error, expected", [(True, None, 1), (False, None, 10),
+    (False, "Too many visits. Exceeded the API Rate Limit.", 60)])
+def test_loop_wait_for_protection_and_rate_limits(monkeypatch, pending, error, expected):
+    bot = BybitDemoBot(config(), Mock(), DemoState("2026-01-01T00:00:00Z"))
+    bot.state.pending_protection_side = "Buy" if pending else None
+    bot.reconcile_once = Mock(side_effect=BybitDemoError(error)) if error else Mock(return_value=None)
+    monkeypatch.setattr(cli.signal, "signal", lambda *_: None)
+    ticks = [0]
+    monkeypatch.setattr(cli.time, "monotonic", lambda: ticks[0])
+    def sleep(seconds):
+        ticks[0] += seconds
+        if ticks[0] >= expected:
+            bot.stop()
+    monkeypatch.setattr(cli.time, "sleep", sleep)
+    bot.run(10)
+    assert ticks[0] == expected
+    bot.reconcile_once.assert_called_once()
+
+
+def test_exchange_close_logged_once(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(cli, "STATE_FILE", tmp_path / "state.json")
+    state = DemoState("2026-01-01T00:00:00Z", observed_position_side="Buy")
+    bot = BybitDemoBot(config(), Mock(position=Mock(return_value=None)), state)
+    monkeypatch.setattr(cli, "fetch_completed_linear_klines", lambda *_:
+        pd.DataFrame([{"time": pd.Timestamp("2026-01-01T00:02:00Z")}]))
+    monkeypatch.setattr(cli, "calculate_strategy_decision", lambda *_: Mock(side=None))
+    now = datetime(2026, 1, 1, 0, 3, 30, tzinfo=timezone.utc)
+    bot.reconcile_once(now)
+    bot.reconcile_once(now)
+    assert capsys.readouterr().out.count("position closed on exchange") == 1
+    assert json.loads(cli.STATE_FILE.read_text())["observed_position_side"] is None
