@@ -75,3 +75,53 @@ def test_protection_failure_emergency_closes_and_halts(bot):
         bot.reconcile_once(NOW)
     assert bot.state.halted_reason
     bot.client.market_order.assert_called_once_with('BTCUSDT', 'Sell', Decimal('1'), reduce_only=True)
+
+
+@pytest.mark.parametrize('side,signal', [('Buy', 'Long'), ('Sell', 'Short')])
+def test_exchange_exit_waits_one_candle_and_survives_restart(bot, monkeypatch, side, signal):
+    monkeypatch.setattr(cli, 'reference_decision', lambda *_: Mock(side=signal))
+    bot.state.observed_position_side = side
+    assert 'waiting for next completed candle' in bot.reconcile_once(NOW)
+    bot.client.market_order.assert_not_called()
+    assert bot.state.last_processed_candle == '2026-01-01T00:01:00+00:00'
+
+    resumed = cli.ReferenceAlignedDemoBot(bot.config, bot.client, cli.DemoState.load_or_create(True))
+    assert resumed.reconcile_once(NOW) is None
+    bot.client.market_order.assert_not_called()
+    candles = pd.DataFrame([{'time': pd.Timestamp('2026-01-01T00:02:00Z')}])
+    monkeypatch.setattr(cli, 'fetch_completed_linear_klines', lambda *_: candles)
+    assert f'opened {side}' in resumed.reconcile_once(datetime(2026, 1, 1, 0, 3, 5, tzinfo=timezone.utc))
+    bot.client.market_order.assert_called_once()
+
+
+def test_after_exchange_exit_rechecks_signal_instead_of_forcing_reentry(bot, monkeypatch):
+    bot.state.observed_position_side = 'Buy'
+    bot.reconcile_once(NOW)
+    monkeypatch.setattr(cli, 'reference_decision', lambda *_: Mock(side=None))
+    candles = pd.DataFrame([{'time': pd.Timestamp('2026-01-01T00:02:00Z')}])
+    monkeypatch.setattr(cli, 'fetch_completed_linear_klines', lambda *_: candles)
+    assert bot.reconcile_once(datetime(2026, 1, 1, 0, 3, 5, tzinfo=timezone.utc)) is None
+    bot.client.market_order.assert_not_called()
+
+
+def test_strategy_reversal_survives_restart_without_extra_candle_delay(bot):
+    bot.client.position.return_value = {'side': 'Sell', 'avgPrice': '100', 'size': '1'}
+    bot.reconcile_once(NOW)
+    resumed = cli.ReferenceAlignedDemoBot(bot.config, bot.client, cli.DemoState.load_or_create(True))
+    assert resumed.state.pending_strategy_close
+    bot.client.position.return_value = None
+    assert 'opened Buy' in resumed.reconcile_once(NOW)
+    assert not resumed.state.pending_strategy_close
+
+
+@pytest.mark.parametrize('start', ['2026-01-01T00:01:00+00:00', '2026-01-01T00:01:55+00:00'])
+def test_fresh_start_waits_until_completed_candle_after_launch(bot, monkeypatch, start):
+    bot.state.launched_at = start
+    calculate = Mock(return_value=Mock(side='Long'))
+    monkeypatch.setattr(cli, 'reference_decision', calculate)
+    assert bot.reconcile_once(NOW) is None
+    calculate.assert_not_called()
+    bot.client.market_order.assert_not_called()
+    candles = pd.DataFrame([{'time': pd.Timestamp('2026-01-01T00:02:00Z')}])
+    monkeypatch.setattr(cli, 'fetch_completed_linear_klines', lambda *_: candles)
+    assert 'opened Buy' in bot.reconcile_once(datetime(2026, 1, 1, 0, 3, 5, tzinfo=timezone.utc))

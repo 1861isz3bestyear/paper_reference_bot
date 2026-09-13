@@ -98,9 +98,14 @@ is present at startup, aligning the strategy start and VWAP anchor. Otherwise it
 its own launch timestamp. Both processes must use the same configuration for comparison.
 
 Demo entries and ordinary exits use completed-candle decisions and market orders. There
-is no additional VWAP TP entry filter or consumed-direction re-entry guard: after an
-exchange close, the bot may re-enter on the next unprocessed completed candle if the
-strategy still requests that side. Exchange VWAP TP is explicitly cleared on protection
+is no additional VWAP TP entry filter or consumed-direction re-entry guard. When an
+exchange-side exit is first observed, demo records that completed candle as processed
+and waits for a later completed candle before considering another entry, matching
+reference's close-then-re-enter cadence. This wait survives restart. It applies to
+observed exchange exits (including manual closes); actual stop/fill timing can still
+differ from reference. Strategy-requested reversals remain eligible as soon as the
+exchange confirms closure, without an extra candle delay. A fresh launch waits quietly
+until a completed candle is later than the strategy start. Exchange VWAP TP is explicitly cleared on protection
 updates, including existing positions after upgrade. The configured exchange SL remains
 (0 disables it). Failure to install initial protection attempts an emergency close and halts.
 Pending entry submissions block additional entries until a position is observed; an

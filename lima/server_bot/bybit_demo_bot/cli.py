@@ -42,6 +42,7 @@ class DemoState:
     halted_reason: str | None = None
     consumed_signal_side: str | None = None
     observed_position_side: str | None = None
+    pending_strategy_close: bool = False
 
     @classmethod
     def load_or_create(cls, resume: bool) -> "DemoState":
@@ -181,6 +182,10 @@ class BybitDemoBot:
         if self.state.last_processed_candle == latest.isoformat():
             return None
         launched = pd.Timestamp(self.state.launched_at)
+        if self.REFERENCE_ALIGNED and latest <= launched:
+            # A fresh reference start can be later than the latest closed candle.
+            # Wait normally instead of backing off on an invalid backtest range.
+            return None
         start = launched - timedelta(days=self.config.anchor_before_days) if self.config.anchor_before_strategy_start else launched
         start_ms = int(start.timestamp() * 1000)
         request_start_ms = start_ms
@@ -204,13 +209,25 @@ class BybitDemoBot:
         if position is None:
             position = self.client.position(self.symbol)
         observed = str(position["side"]) if position else None
-        if self.state.observed_position_side and observed is None:
+        exchange_closed = bool(self.state.observed_position_side and observed is None)
+        if exchange_closed:
             print(
                 f"{datetime.now(timezone.utc).isoformat()} observed {self.state.observed_position_side} "
                 "position closed on exchange; consult execution history for fill and exit reason",
                 flush=True,
             )
         self.state.observed_position_side = observed
+        if self.REFERENCE_ALIGNED:
+            if exchange_closed and not self.state.pending_strategy_close:
+                # Reference spends this candle closing its local position. Do not
+                # use that same candle to enter again after an exchange-side exit.
+                # Save the observation and cursor together so resume keeps the wait.
+                self.state.last_processed_candle = latest.isoformat()
+                self.state.consumed_signal_side = None
+                self.state.save()
+                return "exchange closure observed; waiting for next completed candle before entry"
+            if observed is None:
+                self.state.pending_strategy_close = False
         self.state.save()
         decision = (reference_decision if self.REFERENCE_ALIGNED else calculate_strategy_decision)(candles, self.config, launched)
         desired = "Buy" if decision.side == "Long" else "Sell" if decision.side == "Short" else None
@@ -316,11 +333,16 @@ class ReferenceAlignedDemoBot(BybitDemoBot):
     def reconcile_reference_position(self, position, desired, latest) -> str | None:
         existing = str(position["side"]) if position else None
         if position and existing != desired:
+            # Distinguish our own strategy exits/reversals from exchange stops.
+            # Persist before submission because the response may be ambiguous.
+            self.state.pending_strategy_close = True
+            self.state.save()
             self.client.market_order(self.symbol, "Sell" if existing == "Buy" else "Buy",
                                      Decimal(str(position["size"])), reduce_only=True)
             # Confirm closure before sizing a reversal; retry on the same candle.
             return f"submitted close {existing}; awaiting exchange reconciliation"
         if position:
+            self.state.pending_strategy_close = False
             result = self._protect(position, Decimal("0"))
         elif desired:
             quantity = self._quantity(self.client.last_price(self.symbol))
