@@ -91,28 +91,33 @@ uv run python -m server_bot.cli run-bybit-demo --resume \
 The paper bots and demo bot support non-reversed `Bybit REST` configurations for
 `BTC_USDT`, `XRP_USDT`, `DOGE_USDT`, `ADA_USDT`, `TRX_USDT`, `LINK_USDT`, `AVAX_USDT`,
 `DOT_USDT`, `TON_USDT`, and `NEAR_USDT`. The demo bot reads completed
-Bybit candles, calculates the same target side as `live_paper_bot`, sizes entries from
-90% of the demo account's available USDT using the selected contract's live quantity and
-notional limits, and
-reconciles the demo account with market orders. Every entry is
-followed by exchange-side stop-loss and take-profit protection. The take-profit price is
-the configured `close_order_vwap_sigma` band and is refreshed after every completed candle
-while the position remains open. Failure to install the initial protection triggers an
-emergency close and halts further trading.
+Bybit candles and uses `reference_bot`'s target-side calculation. Entries are sized from
+90% of the demo account's available USDT using exchange quantity and notional limits.
+The demo runner uses reference's persisted launch timestamp when `reference_state.json`
+is present at startup, aligning the strategy start and VWAP anchor. Otherwise it retains
+its own launch timestamp. Both processes must use the same configuration for comparison.
 
-Before entry, the executor rejects a signal whose VWAP take-profit has already crossed the
-current price. If market slippage still puts the actual fill beyond that target, it submits an
-emergency close, clears the pending entry, and waits for the next completed candle without
-permanently halting. A failed emergency close or a genuine protection API failure still persists
-a halt for operator review. When an existing position is protected, a newly calculated band on
-the wrong side of its entry is ignored so the last valid exchange-side protection stays in place.
+Demo entries and ordinary exits use completed-candle decisions and market orders. There
+is no additional VWAP TP entry filter or consumed-direction re-entry guard: after an
+exchange close, the bot may re-enter on the next unprocessed completed candle if the
+strategy still requests that side. Exchange VWAP TP is explicitly cleared on protection
+updates, including existing positions after upgrade. The configured exchange SL remains
+(0 disables it). Failure to install initial protection attempts an emergency close and halts.
+Pending entry submissions block additional entries until a position is observed; an
+ambiguous or rejected submission with no resulting position requires operator review.
+Reversals wait for an observed flat exchange position before opening the opposite side.
+
+This aligns trading rules, not exact fills or account balances: the exchange SL can fire
+intraminute, market fills and funding differ, and reference uses its own simulated capital.
+After updating the server checkout, restart `bybit-demo.service` with the existing resume
+state. No account reset is required. These changes do not alter mainnet's execution policy.
 
 Use the centralized [`../install`](../install/README.md) utility for the supported user-systemd
 service; do not maintain a separate hand-written unit.
 
 ## Real-money Bybit executor
 
-`bybit_bot` uses the same strategy, 90%-of-available-USDT sizing, reconciliation, and mandatory
+`bybit_bot` uses the shared strategy and legacy execution policy, 90%-of-available-USDT sizing, and mandatory
 exchange-side protection mechanics as `bybit_demo_bot`, but sends orders to Bybit mainnet at
 `https://api.bybit.com`. Its credentials, state, and instance lock are isolated from Demo Trading.
 
@@ -161,7 +166,7 @@ Thresholds can be changed with `--stale-candles` and `--paper-grace-candles`. A 
 
 ### Exchange-side exits and re-entry
 
-The Bybit demo and mainnet executors submit at most one entry per uninterrupted
+The mainnet executor submits at most one entry per uninterrupted
 strategy direction. If an exchange-side stop, take-profit, or manual close leaves
 the account flat, the executor waits until the strategy becomes flat or changes
 direction before allowing another entry. This guard persists with `--resume`.

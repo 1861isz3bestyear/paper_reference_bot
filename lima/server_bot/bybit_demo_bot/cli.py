@@ -16,6 +16,7 @@ import requests
 
 from bybit_demo_bot.client import BybitDemoClient, BybitDemoError
 from live_paper_bot.cli import calculate_strategy_decision
+from reference_bot.cli import calculate_strategy_decision as reference_decision
 from live_paper_bot.market import fetch_completed_linear_klines
 from reference_bot.config import BYBIT_TICKERS, PAPER_BOT_CONFIG_FILE, PaperBotConfig
 from shared.env import load_env, setting
@@ -64,6 +65,7 @@ class DemoState:
 
 
 class BybitDemoBot:
+    REFERENCE_ALIGNED = False
     EXECUTOR_NAME = "Bybit DEMO"
     ACCOUNT_NAME = "Bybit demo"
 
@@ -138,6 +140,8 @@ class BybitDemoBot:
             position = None
         if self.state.pending_protection_side and position:
             try:
+                if self.REFERENCE_ALIGNED:
+                    return self._protect(position, Decimal("0"))
                 if self.state.pending_take_profit is None:
                     raise RuntimeError("pending VWAP take-profit price is missing")
                 return self._protect(position, Decimal(self.state.pending_take_profit))
@@ -167,6 +171,8 @@ class BybitDemoBot:
                 self.state.halted_reason = f"protection failed ({exc}); emergency close submitted"
                 self.state.save()
                 raise RuntimeError(self.state.halted_reason) from exc
+        if self.REFERENCE_ALIGNED and self.state.pending_protection_side:
+            return "awaiting entry reconciliation; no additional order submitted"
         current = pd.Timestamp(now or datetime.now(timezone.utc))
         interval = INTERVAL_SECONDS[self.config.timeframe]
         end_ms = int(current.timestamp() * 1000)
@@ -206,9 +212,11 @@ class BybitDemoBot:
             )
         self.state.observed_position_side = observed
         self.state.save()
-        decision = calculate_strategy_decision(candles, self.config, launched)
+        decision = (reference_decision if self.REFERENCE_ALIGNED else calculate_strategy_decision)(candles, self.config, launched)
         desired = "Buy" if decision.side == "Long" else "Sell" if decision.side == "Short" else None
         existing = str(position["side"]) if position else None
+        if self.REFERENCE_ALIGNED:
+            return self.reconcile_reference_position(position, desired, latest)
         if self.state.consumed_signal_side == "legacy":
             self.state.consumed_signal_side = desired
         elif self.state.consumed_signal_side != desired:
@@ -287,6 +295,50 @@ class BybitDemoBot:
                 time.sleep(min(1, deadline - time.monotonic()))
 
 
+
+class ReferenceAlignedDemoBot(BybitDemoBot):
+    """Reference candle decisions with exchange SL; mainnet keeps legacy behavior."""
+
+    REFERENCE_ALIGNED = True
+
+    def _protect(self, position: dict[str, object], take_profit: Decimal) -> str:
+        entry = Decimal(str(position["avgPrice"]))
+        loss = Decimal(str(self.config.stop_loss_pct)) / 100
+        stop = entry * (1 - loss if position["side"] == "Buy" else 1 + loss) if loss > 0 else Decimal("0")
+        # Zero removes an exchange TP left by the previous executor.
+        self.client.set_protection(self.symbol, stop, Decimal("0"))
+        self.state.observed_position_side = str(position["side"])
+        self.state.pending_protection_side = None
+        self.state.pending_take_profit = None
+        self.state.save()
+        return "position protected with configured SL; exchange TP disabled"
+
+    def reconcile_reference_position(self, position, desired, latest) -> str | None:
+        existing = str(position["side"]) if position else None
+        if position and existing != desired:
+            self.client.market_order(self.symbol, "Sell" if existing == "Buy" else "Buy",
+                                     Decimal(str(position["size"])), reduce_only=True)
+            # Confirm closure before sizing a reversal; retry on the same candle.
+            return f"submitted close {existing}; awaiting exchange reconciliation"
+        if position:
+            result = self._protect(position, Decimal("0"))
+        elif desired:
+            quantity = self._quantity(self.client.last_price(self.symbol))
+            # Persist intent before submission to prevent duplicate ambiguous orders.
+            self.state.pending_protection_side = desired
+            self.state.pending_take_profit = "0"
+            self.state.last_processed_candle = latest.isoformat()
+            self.state.save()
+            self.client.market_order(self.symbol, desired, quantity)
+            return f"opened {desired}; awaiting fill for protection"
+        else:
+            result = None
+        self.state.consumed_signal_side = None
+        self.state.last_processed_candle = latest.isoformat()
+        self.state.save()
+        return result
+
+
 def run_demo_command(config_path: Path, env_path: Path, *, resume: bool = False, poll_seconds: int = 10) -> None:
     if poll_seconds < 1:
         raise ValueError("poll-seconds must be positive")
@@ -297,7 +349,14 @@ def run_demo_command(config_path: Path, env_path: Path, *, resume: bool = False,
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError("Another Bybit demo bot is running") from None
-        BybitDemoBot(config, client, DemoState.load_or_create(resume)).run(poll_seconds)
+        state = DemoState.load_or_create(resume)
+        reference_path = ROOT / "reference_state.json"
+        if reference_path.is_file():
+            reference_start = json.loads(reference_path.read_text(encoding="utf-8"))["launched_at"]
+            pd.Timestamp(reference_start)
+            state.launched_at = reference_start
+            state.save()
+        ReferenceAlignedDemoBot(config, client, state).run(poll_seconds)
 
 
 def parse_args() -> argparse.Namespace:
