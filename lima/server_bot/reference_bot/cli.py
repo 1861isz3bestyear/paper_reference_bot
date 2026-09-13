@@ -39,6 +39,7 @@ from reference_bot.trading import (
 )
 from shared.indicators import add_launch_weekly_anchored_vwap
 from shared.strategy import backtest
+from shared.reference_target import publish_target
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -384,6 +385,12 @@ class PaperBot:
             while self.running:
                 try:
                     self.process_available_candles()
+                    # Publish only after all available candles and ledger changes
+                    # have been reconciled; followers must not replay catch-up trades.
+                    publish_target(
+                        self.state_path.with_name("reference_target.json"), self.config,
+                        self.state, self.trader.current_position(self.trade_symbol),
+                    )
                     retry_seconds = 2
                     self._wait(poll_seconds)
                 except (requests.RequestException, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
@@ -482,6 +489,8 @@ def reset_command() -> None:
             STATE_FILE,
             STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp"),
             CANDLE_CACHE_FILE,
+            STATE_FILE.with_name("reference_target.json"),
+            STATE_FILE.with_name("reference_target.json.tmp"),
             Path(f"{CANDLE_CACHE_FILE}-shm"),
             Path(f"{CANDLE_CACHE_FILE}-wal"),
             PID_FILE,

@@ -351,7 +351,7 @@ def test_run_demo_wires_env_config_and_lock(monkeypatch, tmp_path):
     run = Mock()
     monkeypatch.setattr(cli.BybitDemoBot, "run", run)
     cli.run_demo_command(config_path, env_path, poll_seconds=3)
-    run.assert_called_once_with(3)
+    run.assert_called_once_with(2)
     with pytest.raises(ValueError, match="positive"):
         cli.run_demo_command(config_path, env_path, poll_seconds=0)
 

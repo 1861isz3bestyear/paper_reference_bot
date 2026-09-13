@@ -232,3 +232,5 @@ live_paper_bot.pid
 live_paper_bot.log
 live_paper_bot.instance.lock
 live_paper_candles.sqlite*
+
+reference_target.json*

@@ -65,8 +65,8 @@ Neither bot submits real exchange orders. Bybit credentials are used only for th
 ## Bybit demo-account executor
 
 `bybit_demo_bot` runs the same shared strategy configuration against Bybit Demo Trading at
-`https://api-demo.bybit.com`. It owns separate state and instance-lock files and does not
-depend on either paper process. Use API credentials created inside Bybit's Demo Trading
+`https://api-demo.bybit.com`. It owns separate state and instance-lock files and follows
+the reference process through its atomic `reference_target.json` snapshot. Use API credentials created inside Bybit's Demo Trading
 environment in `bybitapidemo.env` (Bybit Testnet keys are not compatible):
 
 ```bash
@@ -90,32 +90,68 @@ uv run python -m server_bot.cli run-bybit-demo --resume \
 
 The paper bots and demo bot support non-reversed `Bybit REST` configurations for
 `BTC_USDT`, `XRP_USDT`, `DOGE_USDT`, `ADA_USDT`, `TRX_USDT`, `LINK_USDT`, `AVAX_USDT`,
-`DOT_USDT`, `TON_USDT`, and `NEAR_USDT`. The demo bot reads completed
-Bybit candles and uses `reference_bot`'s target-side calculation. Entries are sized from
-90% of the demo account's available USDT using exchange quantity and notional limits.
-The demo runner uses reference's persisted launch timestamp when `reference_state.json`
-is present at startup, aligning the strategy start and VWAP anchor. Otherwise it retains
-its own launch timestamp. Both processes must use the same configuration for comparison.
+`DOT_USDT`, `TON_USDT`, and `NEAR_USDT`. Reference publishes its actual position,
+quantity, entry identity, configuration fingerprint, and heartbeat after each successful
+processing cycle. Demo polls at most every two seconds and copies the latest position
+with market orders. It does not calculate its own signals, allocate 90% of its balance,
+or apply an independent re-entry policy. Both services must use the same configuration.
 
-Demo entries and ordinary exits use completed-candle decisions and market orders. There
-is no additional VWAP TP entry filter or consumed-direction re-entry guard. When an
-exchange-side exit is first observed, demo records that completed candle as processed
-and waits for a later completed candle before considering another entry, matching
-reference's close-then-re-enter cadence. This wait survives restart. It applies to
-observed exchange exits (including manual closes); actual stop/fill timing can still
-differ from reference. Strategy-requested reversals remain eligible as soon as the
-exchange confirms closure, without an extra candle delay. A fresh launch waits quietly
-until a completed candle is later than the strategy start. Exchange VWAP TP is explicitly cleared on protection
-updates, including existing positions after upgrade. The configured exchange SL remains
-(0 disables it). Failure to install initial protection attempts an emergency close and halts.
-Pending entry submissions block additional entries until a position is observed; an
-ambiguous or rejected submission with no resulting position requires operator review.
-Reversals wait for an observed flat exchange position before opening the opposite side.
+**Reference controls all normal exits, including its configured SL and VWAP-band exits.**
+Demo clears exchange SL and TP instead of creating independent stop levels from its own
+fill price. Actual fills, fee rates, funding and account percentage returns can still differ.
+Demo must have sufficient funds for the exact reference quantity; it halts rather than
+silently scaling an entry. Use a dedicated demo account/position for this executor.
 
-This aligns trading rules, not exact fills or account balances: the exchange SL can fire
-intraminute, market fills and funding differ, and reference uses its own simulated capital.
-After updating the server checkout, restart `bybit-demo.service` with the existing resume
-state. No account reset is required. These changes do not alter mainnet's execution policy.
+A saved order link identifies each submission. Demo confirms both terminal order status
+and the resulting exchange position before submitting the next action. Pending/partial
+fills block additional orders. An unresolved order after 60 seconds triggers a persistent
+halt, cancellation attempts, and emergency flattening. A missing/invalid reference,
+configuration mismatch, heartbeat older than 120 seconds, or candle cursor older than
+three intervals plus 30 seconds also halts and attempts to flatten. Initial startup while
+flat allows 120 seconds for the first snapshot. Halts remain recorded in `halted_reason`
+for the SMTP monitor; investigate outstanding orders before clearing a halt. Failed
+emergency closes are retried while the process runs. **This software failsafe cannot close
+positions while the VPS/demo process is stopped or the exchange is unreachable.**
+
+On upgrade, a matching existing position is adopted and old SL/TP removed. A mismatched
+side or quantity is closed before opening the reference target, so migration can incur
+an extra round trip. Reference close/reopen events are distinguished by entry identity,
+even if the side and quantity are unchanged. After downtime, demo reconciles the latest
+position; it does not replay historical trades. Unexpected external closures while
+reference still holds halt the replica instead of creating a repeated re-entry loop.
+
+### Upgrade or start with fresh reference accounting
+
+Update the server files first. This version requires restarting **reference as well as
+demo**, because reference now publishes the target snapshot. Keep `--resume` and the
+existing demo state so outstanding orders remain identifiable.
+
+```bash
+systemctl --user stop paper-bot-reference.service bybit-demo.service
+cd ~/paper_reference_bot/lima/server_bot
+
+# Optional: deletes reference's simulated account/history and creates a new start.
+# Omit this line to preserve reference history.
+uv run python -m reference_bot.cli reset
+
+systemctl --user start paper-bot-reference.service
+```
+
+Check `reference_target.json` exists and its `published_at` and `reference_run` are current
+before starting demo (inspect reference logs if the file has not appeared):
+
+```bash
+cat reference_target.json
+systemctl --user start bybit-demo.service
+systemctl --user status paper-bot-reference.service bybit-demo.service --no-pager -l
+journalctl --user-unit=paper-bot-reference.service --user-unit=bybit-demo.service --since "5 minutes ago" -f
+```
+
+Resetting reference does not erase Bybit's transaction history, reset its balance, or
+close exchange positions while the services are stopped. On resume, demo reconciles the
+new reference target, including closing an existing position if reference is flat. Never
+delete `bybit_demo_state.json` merely to reset accounting. No mainnet execution policy is
+changed by this replica upgrade.
 
 Use the centralized [`../install`](../install/README.md) utility for the supported user-systemd
 service; do not maintain a separate hand-written unit.
@@ -123,7 +159,7 @@ service; do not maintain a separate hand-written unit.
 ## Real-money Bybit executor
 
 `bybit_bot` uses the shared strategy and legacy execution policy, 90%-of-available-USDT sizing, and mandatory
-exchange-side protection mechanics as `bybit_demo_bot`, but sends orders to Bybit mainnet at
+exchange-side SL/TP protection. It remains an independent executor and sends orders to Bybit mainnet at
 `https://api.bybit.com`. Its credentials, state, and instance lock are isolated from Demo Trading.
 
 Create a dedicated trading key with withdrawals disabled:

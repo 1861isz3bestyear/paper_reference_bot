@@ -43,6 +43,9 @@ class DemoState:
     consumed_signal_side: str | None = None
     observed_position_side: str | None = None
     pending_strategy_close: bool = False
+    replica_initialized: bool = False
+    replica_position_id: str | None = None
+    replica_order: dict | None = None
 
     @classmethod
     def load_or_create(cls, resume: bool) -> "DemoState":
@@ -66,6 +69,7 @@ class DemoState:
 
 
 class BybitDemoBot:
+    MAX_RETRY_SECONDS = 300
     REFERENCE_ALIGNED = False
     EXECUTOR_NAME = "Bybit DEMO"
     ACCOUNT_NAME = "Bybit demo"
@@ -304,7 +308,7 @@ class BybitDemoBot:
                     flush=True,
                 )
                 wait_seconds = retry_seconds
-                retry_seconds = min(retry_seconds * 2, 300)
+                retry_seconds = min(retry_seconds * 2, self.MAX_RETRY_SECONDS)
             else:
                 wait_seconds = 1 if self.state.pending_protection_side else poll_seconds
             deadline = time.monotonic() + wait_seconds
@@ -372,13 +376,8 @@ def run_demo_command(config_path: Path, env_path: Path, *, resume: bool = False,
         except BlockingIOError:
             raise RuntimeError("Another Bybit demo bot is running") from None
         state = DemoState.load_or_create(resume)
-        reference_path = ROOT / "reference_state.json"
-        if reference_path.is_file():
-            reference_start = json.loads(reference_path.read_text(encoding="utf-8"))["launched_at"]
-            pd.Timestamp(reference_start)
-            state.launched_at = reference_start
-            state.save()
-        ReferenceAlignedDemoBot(config, client, state).run(poll_seconds)
+        from bybit_demo_bot.replica import ReferenceReplicaBot
+        ReferenceReplicaBot(config, client, state).run(min(poll_seconds, 2))
 
 
 def parse_args() -> argparse.Namespace:

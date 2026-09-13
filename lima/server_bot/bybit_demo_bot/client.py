@@ -89,11 +89,14 @@ class BybitDemoClient:
         rows = self._request("GET", "/v5/position/list", {"category": "linear", "symbol": symbol}).get("list", [])
         return next((row for row in rows if Decimal(str(row.get("size", 0))) > 0), None)
 
-    def market_order(self, symbol: str, side: str, quantity: Decimal, *, reduce_only: bool = False) -> str:
-        result = self._request("POST", "/v5/order/create", {
+    def market_order(self, symbol: str, side: str, quantity: Decimal, *, reduce_only: bool = False, order_link_id: str | None = None) -> str:
+        values = {
             "category": "linear", "symbol": symbol, "side": side, "orderType": "Market",
             "qty": format(quantity, "f"), "reduceOnly": reduce_only,
-        })
+        }
+        if order_link_id is not None:
+            values["orderLinkId"] = order_link_id
+        result = self._request("POST", "/v5/order/create", values)
         order_id = result.get("orderId")
         if not order_id:
             raise BybitDemoError(f"{self.environment_name} returned no order ID")
@@ -111,3 +114,16 @@ class BybitDemoClient:
             # Existing exchange-side SL/TP is already the requested protection.
             if "not modified" not in str(exc).lower():
                 raise
+
+    def order_by_link(self, symbol: str, order_link_id: str) -> dict[str, Any] | None:
+        values = {"category": "linear", "symbol": symbol, "orderLinkId": order_link_id}
+        for endpoint in ("/v5/order/realtime", "/v5/order/history"):
+            rows = self._request("GET", endpoint, values).get("list", [])
+            if rows:
+                return rows[0]
+        return None
+
+    def cancel_by_link(self, symbol: str, order_link_id: str) -> None:
+        self._request("POST", "/v5/order/cancel", {
+            "category": "linear", "symbol": symbol, "orderLinkId": order_link_id,
+        })
