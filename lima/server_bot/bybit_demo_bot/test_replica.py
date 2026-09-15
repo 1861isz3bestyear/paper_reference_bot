@@ -329,3 +329,107 @@ def test_restart_accepts_already_filled_order_even_after_timeout(setup):
     assert 'fill confirmed' in resumed.reconcile_once(later)
     assert not resumed.state.halted_reason
     client.market_order.assert_called_once()
+
+
+def test_slow_position_request_cannot_make_fresh_heartbeat_look_future(setup, monkeypatch):
+    import bybit_demo_bot.replica as module
+    bot, client, target = setup
+    clock = [NOW]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+
+    monkeypatch.setattr(module, 'datetime', Clock)
+
+    def slow_position(_):
+        clock[0] += timedelta(seconds=10)
+        target(now=clock[0])
+        return None
+
+    client.position.side_effect = slow_position
+    assert 'submitted entry' in bot.reconcile_once()
+    assert not bot.state.halted_reason
+
+
+def test_snapshot_read_delay_uses_clock_after_read(setup, monkeypatch):
+    import bybit_demo_bot.replica as module
+    bot, _, target = setup
+    later = NOW + timedelta(seconds=10)
+    target(now=later)
+    clock = Mock()
+    clock.now.return_value = later
+    monkeypatch.setattr(module, 'datetime', clock)
+    clock.fromisoformat.side_effect = datetime.fromisoformat
+    assert bot._target()['side'] == 'Sell'
+
+
+def test_heartbeat_error_records_measured_age_and_timestamps(setup):
+    bot, _, target = setup
+    target(published_at=(NOW + timedelta(seconds=10)).isoformat())
+    with pytest.raises(RuntimeError, match='age=-10.000s; published_at=.*checked_at='):
+        bot._target(NOW)
+
+
+def test_halted_flat_state_clears_old_position_but_preserves_order_intent(setup):
+    bot, client, _ = setup
+    bot.state.halted_reason = 'stale'
+    bot.state.observed_position_side = 'Buy'
+    bot.state.replica_position_id = 'old'
+    bot.state.replica_order = {'link': 'old-order'}
+    client.order_by_link.return_value = None
+    bot.reconcile_once(NOW)
+    saved = cli.DemoState.load_or_create(True)
+    assert saved.observed_position_side is None
+    assert saved.replica_position_id is None
+    assert saved.replica_order == {'link': 'old-order'}
+    assert saved.halted_reason == 'stale'
+
+
+@pytest.mark.parametrize('blocked', [None, 'position', 'open_order', 'unknown_order', 'pending_order', 'legacy', 'stale'])
+def test_checked_recovery_is_read_only_on_exchange_and_preserves_failed_state(setup, monkeypatch, blocked):
+    from bybit_demo_bot.recover import recover
+    bot, client, target = setup
+    bot.state.halted_reason = 'reference target unavailable: reference heartbeat is stale or in the future'
+    bot.state.observed_position_side = 'Buy'
+    bot.state.replica_position_id = 'old'
+    client.has_open_orders.return_value = False
+    original_target = bot._target
+    monkeypatch.setattr(bot, '_target', lambda: original_target(NOW))
+    if blocked == 'position':
+        client.position.return_value = {'side': 'Buy', 'size': '7.3'}
+    elif blocked == 'open_order':
+        client.has_open_orders.return_value = True
+    elif blocked in ('unknown_order', 'pending_order'):
+        bot.state.replica_order = {'link': 'old'}
+        client.order_by_link.return_value = None if blocked == 'unknown_order' else {'orderStatus': 'New'}
+    elif blocked == 'legacy':
+        bot.state.pending_protection_side = 'Buy'
+    elif blocked == 'stale':
+        target(published_at='2026-09-13T14:00:00+00:00')
+    bot.state.save()
+    before = cli.STATE_FILE.read_bytes()
+    if blocked:
+        with pytest.raises(RuntimeError):
+            recover(bot)
+        assert cli.STATE_FILE.read_bytes() == before
+    else:
+        assert 'Halt cleared' in recover(bot)
+        saved = cli.DemoState.load_or_create(True)
+        assert saved.halted_reason is None
+        assert saved.replica_position_id is None
+        backups = list(cli.STATE_FILE.parent.glob('*.recovery-*.bak'))
+        assert len(backups) == 1 and backups[0].read_bytes() == before
+    client.market_order.assert_not_called()
+    client.cancel_by_link.assert_not_called()
+    client.set_protection.assert_not_called()
+
+
+def test_recovery_command_refuses_running_service(setup, monkeypatch):
+    from bybit_demo_bot.recover import recover_command
+    bot, _, _ = setup
+    monkeypatch.setattr(cli, 'LOCK_FILE', bot.target_path.parent / 'instance.lock')
+    monkeypatch.setattr(cli.fcntl, 'flock', Mock(side_effect=BlockingIOError))
+    with pytest.raises(RuntimeError, match='Stop bybit-demo.service'):
+        recover_command(bot.target_path, bot.target_path)

@@ -127,3 +127,9 @@ class BybitDemoClient:
         self._request("POST", "/v5/order/cancel", {
             "category": "linear", "symbol": symbol, "orderLinkId": order_link_id,
         })
+
+    def has_open_orders(self, symbol: str) -> bool:
+        result = self._request("GET", "/v5/order/realtime", {
+            "category": "linear", "symbol": symbol, "openOnly": 0,
+        })
+        return bool(result.get("list") or result.get("nextPageCursor"))

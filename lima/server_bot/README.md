@@ -214,3 +214,36 @@ direction before allowing another entry. This guard persists with `--resume`.
 Existing state files without the guard conservatively consume the current signal
 on upgrade, waiting for a signal change before entering. Order submission errors
 also consume the signal because the exchange may have accepted the request.
+
+### Recovering a replica halt without resetting accounts
+
+Heartbeat freshness is checked using the time after reading the reference snapshot,
+not the time before the Bybit position request. Heartbeat errors include measured age,
+publish time, and check time. Halts remain persistent; healthy reference data alone does
+not clear them. Emergency cleanup refreshes the saved observed position, while preserving
+any unresolved order intent.
+
+After installing the fix, leave reference running and stop only demo:
+
+```bash
+systemctl --user stop bybit-demo.service
+cd ~/paper_reference_bot/lima/server_bot
+uv run python -m bybit_demo_bot.recover
+```
+
+Recovery takes demo's instance lock, checks that the exchange position is flat and there
+are no open orders for its symbol, verifies any recorded order is terminal, and validates
+a fresh matching reference snapshot. It refuses unresolved legacy entries. Only after
+all checks succeed does it back up the state and clear the halt and obsolete position
+identity. It neither submits nor cancels orders and does not reset either account's history.
+Use `--config` and `--env` if the service uses nondefault paths. If a check fails, the saved
+halt is retained; resolve the reported condition rather than deleting the state file.
+
+After a successful recovery:
+
+```bash
+systemctl --user start bybit-demo.service
+journalctl --user-unit=bybit-demo.service --since "5 minutes ago" -f
+```
+
+Demo then follows the current reference target; it does not replay trades missed while halted.

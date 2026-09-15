@@ -43,16 +43,20 @@ class ReferenceReplicaBot(BybitDemoBot):
         self._limits = None
         self._missing_since = None
 
-    def _target(self, now: datetime) -> dict:
+    def _target(self, now: datetime | None = None) -> dict:
         try:
             target = json.loads(self.target_path.read_text(encoding="utf-8"))
+            now = now or datetime.now(timezone.utc)
             if target["version"] != 1 or target["config_fingerprint"] != self.fingerprint:
                 raise ValueError("reference configuration/version does not match demo")
             if target["symbol"] != self.symbol or target["timeframe"] != self.config.timeframe:
                 raise ValueError("reference symbol/timeframe does not match demo")
             heartbeat_age = (now - timestamp(target["published_at"])).total_seconds()
             if not -5 <= heartbeat_age <= self.HEARTBEAT_TIMEOUT:
-                raise ValueError("reference heartbeat is stale or in the future")
+                raise ValueError(
+                    f"reference heartbeat is stale or in the future: age={heartbeat_age:.3f}s; "
+                    f"published_at={target['published_at']}; checked_at={now.isoformat()}"
+                )
             run = timestamp(target["reference_run"])
             interval = INTERVAL_SECONDS[self.config.timeframe]
             cursor = target["last_processed_candle"]
@@ -88,6 +92,10 @@ class ReferenceReplicaBot(BybitDemoBot):
     def _flatten_halted(self, position) -> str:
         # Keep reconciling even after halting: a delayed entry must not escape
         # cleanup, and a failed/partial emergency close must be retried.
+        self.state.observed_position_side = str(position["side"]) if position else None
+        if position is None:
+            self.state.replica_position_id = None
+        self.state.save()
         pending = self.state.replica_order
         if pending:
             try:
@@ -165,8 +173,9 @@ class ReferenceReplicaBot(BybitDemoBot):
         return "reference replica awaiting order/fill reconciliation"
 
     def reconcile_once(self, now: datetime | None = None) -> str | None:
-        now = now or datetime.now(timezone.utc)
+        supplied_now = now
         position = self.client.position(self.symbol)
+        now = supplied_now or datetime.now(timezone.utc)
         if self.state.halted_reason:
             return self._flatten_halted(position)
         try:
@@ -175,7 +184,7 @@ class ReferenceReplicaBot(BybitDemoBot):
                 self._missing_since = self._missing_since or now
                 if (now - self._missing_since).total_seconds() <= self.HEARTBEAT_TIMEOUT:
                     return "reference replica waiting for initial reference target"
-            target = self._target(now)
+            target = self._target(supplied_now)
             self._missing_since = None
             # Do not silently discard an uncertain entry from the older executor.
             if self.state.pending_protection_side and position is None:
