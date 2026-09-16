@@ -20,6 +20,23 @@ def recover(bot: ReferenceReplicaBot) -> str:
         return "Demo is not halted; no state changed."
     if state.pending_protection_side:
         raise RuntimeError("Legacy entry is unresolved; recovery refused.")
+    from shared.hedge_strategy import HEDGE_MODE
+    if bot.config.strategy_mode == HEDGE_MODE:
+        for order in (state.hedge_state or {}).get("orders", {}).values():
+            if order["submitted_at"] is not None:
+                observed = bot.client.order_by_link(bot.symbol, order["link"])
+                if not observed or observed["orderStatus"] not in TERMINAL:
+                    raise RuntimeError("Hedge order is unresolved; recovery refused.")
+        if bot.client.hedge_positions(bot.symbol) or bot.client.has_open_orders(bot.symbol):
+            raise RuntimeError("Both hedge legs and orders must be flat before recovery.")
+        bot._target()
+        backup = cli.STATE_FILE.with_name(f"{cli.STATE_FILE.name}.recovery-{uuid4().hex}.bak")
+        backup.write_bytes(cli.STATE_FILE.read_bytes())
+        if state.hedge_state:
+            state.hedge_state["complete"] = True
+        state.halted_reason = None
+        state.save()
+        return f"Hedge halt cleared; completed cycle will not replay. Backup: {backup.name}"
     if state.replica_order:
         order = bot.client.order_by_link(bot.symbol, state.replica_order["link"])
         if not order or order.get("orderStatus") not in TERMINAL:
@@ -60,7 +77,10 @@ def recover_command(config_path: Path, env_path: Path) -> str:
         config = PaperBotConfig.load(config_path)
         values = load_env(env_path)
         client = BybitDemoClient(setting(values, "BYBIT_API_KEY"), setting(values, "BYBIT_API_SECRET"))
-        return recover(ReferenceReplicaBot(config, client, cli.DemoState.load_or_create(True)))
+        from shared.hedge_strategy import HEDGE_MODE
+        from bybit_demo_bot.hedge import HedgeReplicaBot
+        executor = HedgeReplicaBot if config.strategy_mode == HEDGE_MODE else ReferenceReplicaBot
+        return recover(executor(config, client, cli.DemoState.load_or_create(True)))
 
 
 def main() -> None:

@@ -24,6 +24,7 @@ LOCK_FILE = ROOT / "bybit_bot.instance.lock"
 class BybitState:
     launched_at: str
     last_processed_candle: str | None = None
+    hedge_state: dict | None = None
     pending_protection_side: str | None = None
     pending_take_profit: str | None = None
     halted_reason: str | None = None
@@ -77,7 +78,10 @@ def run_bybit_command(
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError("Another Bybit mainnet bot is running") from None
-        BybitBot(config, client, BybitState.load_or_create(resume)).run(poll_seconds)
+        from shared.hedge_strategy import HEDGE_MODE
+        from bybit_demo_bot.hedge import HedgeReplicaBot
+        executor = HedgeReplicaBot if config.strategy_mode == HEDGE_MODE else BybitBot
+        executor(config, client, BybitState.load_or_create(resume)).run(poll_seconds)
 
 
 def parse_args() -> argparse.Namespace:

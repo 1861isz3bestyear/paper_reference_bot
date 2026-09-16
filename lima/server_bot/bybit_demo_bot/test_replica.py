@@ -433,3 +433,39 @@ def test_recovery_command_refuses_running_service(setup, monkeypatch):
     monkeypatch.setattr(cli.fcntl, 'flock', Mock(side_effect=BlockingIOError))
     with pytest.raises(RuntimeError, match='Stop bybit-demo.service'):
         recover_command(bot.target_path, bot.target_path)
+
+
+def test_latched_reference_halt_reports_recovery_without_resuming_orders(setup):
+    bot, client, target = setup
+    target(published_at=(NOW - timedelta(minutes=3)).isoformat())
+    assert 'trading halted' in bot.reconcile_once(NOW)
+    original_reason = bot.state.halted_reason
+    assert 'current reference unavailable' in bot.reconcile_once(NOW)
+    target(now=NOW)
+    assert 'current reference healthy; checked recovery required' in bot.reconcile_once(NOW)
+    assert bot.state.halted_reason == original_reason
+    client.market_order.assert_not_called()
+
+
+def test_repeated_flat_halt_logs_are_throttled_but_reconciliation_continues(setup, monkeypatch, capsys):
+    bot, client, _ = setup
+    ticks = [0.]
+    monkeypatch.setattr(cli.signal, 'signal', lambda *_: None)
+    monkeypatch.setattr(cli.time, 'monotonic', lambda: ticks[0])
+    def sleep(seconds):
+        ticks[0] += seconds
+        if ticks[0] >= 65:
+            bot.stop()
+    monkeypatch.setattr(cli.time, 'sleep', sleep)
+    bot.reconcile_once = Mock(return_value='trading halted: saved reason; exchange position flat')
+    bot.run(2)
+    assert bot.reconcile_once.call_count > 30
+    assert capsys.readouterr().out.count('trading halted:') == 2
+
+
+def test_old_engine_snapshot_is_rejected_even_with_matching_config(setup):
+    import hashlib
+    bot, client, target = setup
+    target(config_fingerprint=hashlib.sha256(bot.config.to_json().encode()).hexdigest())
+    assert 'configuration/version does not match' in bot.reconcile_once(NOW)
+    client.market_order.assert_not_called()

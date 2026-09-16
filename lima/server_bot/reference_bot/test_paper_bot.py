@@ -154,7 +154,7 @@ class TestPaperBot:
             "anchor_before_strategy_start", "anchor_before_days",
             "data_source", "ticker", "reverse_ticker",
             "open_position_side",
-            "minimum_order_size",
+            "minimum_order_size", "stop_loss_basis", "hedge_entry_timeout_bars",
             "open_sigma_1", "close_sigma_1", "open_sigma_2", "close_sigma_2",
         }
 

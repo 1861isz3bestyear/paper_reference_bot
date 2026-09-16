@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import time, timezone, tzinfo
+from datetime import date, time, timezone, tzinfo
 
 import numpy as np
 import pandas as pd
@@ -25,7 +25,22 @@ def backtest(
     open_position_side: str = "Both",
     trend_mode: bool = False,
     minimum_order_size: float = 0.0,
+    stop_loss_basis: str = "Position",
+    hedge_entry_timeout_bars: int = 3,
 ) -> tuple[pd.DataFrame, list[Trade]]:
+    if not np.isfinite(initial_capital) or initial_capital <= 0:
+        raise ValueError("Initial capital must be finite and positive.")
+    if not np.isfinite(fee_pct) or not 0 <= fee_pct < 100:
+        raise ValueError("Fee percentage must be finite and between 0 and 100.")
+    for value in (stop_loss_pct, take_profit_pct, minimum_order_size, band_sigma, exit_band_sigma):
+        if not np.isfinite(value) or value < 0:
+            raise ValueError("Risk, band, and minimum order parameters must be finite and nonnegative.")
+    prices = df[["open", "high", "low", "close"]]
+    if (not np.isfinite(prices.to_numpy(dtype=float)).all() or (prices <= 0).any().any()
+            or (df["low"] > prices.min(axis=1)).any() or (df["high"] < prices.max(axis=1)).any()):
+        raise ValueError("Candles must contain finite positive prices with valid OHLC ranges.")
+    if df["time"].isna().any() or not df["time"].is_monotonic_increasing or df["time"].duplicated().any():
+        raise ValueError("Candle times must be unique, valid, and increasing.")
     strategy_start_at = pd.Timestamp(strategy_start_at)
     strategy_end_at = pd.Timestamp(strategy_end_at)
     if strategy_start_at >= strategy_end_at:
@@ -35,6 +50,10 @@ def backtest(
     if minimum_order_size < 0:
         raise ValueError("Minimum order size cannot be negative.")
 
+    # Orders use only indicators known before the candle opened.
+    df = df.copy()
+    df["order_vwap"] = df["anchored_vwap"].shift(1)
+    df["order_std"] = df["anchored_std"].shift(1)
     strategy_df = df[
         (df["time"] >= strategy_start_at) & (df["time"] <= strategy_end_at)
     ].copy()
@@ -71,6 +90,11 @@ def backtest(
     if strategy_df.empty:
         return pd.DataFrame(columns=["time", "equity", "position", "close", "anchored_vwap"]), []
 
+    from shared.hedge_strategy import HEDGE_MODE, hedge_backtest
+    if strategy_mode == HEDGE_MODE:
+        return hedge_backtest(strategy_df, initial_capital, fee_pct, exit_band_sigma,
+            stop_loss_pct, stop_loss_basis, hedge_entry_timeout_bars, minimum_order_size, scheduled_days)
+
     cash = initial_capital
     quantity = 0.0
     entry_price = 0.0
@@ -97,7 +121,7 @@ def backtest(
         else:
             gross_exposure = quantity * exit_price
             exit_fee = gross_exposure * fee_pct / 100
-            trade_pnl = quantity * (entry_price - exit_price) - exit_fee
+            trade_pnl = quantity * (entry_price - exit_price) - entry_capital * fee_pct / 100 - exit_fee
             cash = entry_capital + trade_pnl
         return_pct = trade_pnl / entry_capital * 100
         trades.append(
@@ -129,6 +153,17 @@ def backtest(
         cash = 0.0
         position_side = side
 
+    def band_fill(row, level: float, upward: bool) -> float | None:
+        if pd.isna(level):
+            return None
+        opening = float(row.open)
+        # A pre-existing exit crossed by a gap executes at the opening price.
+        if (upward and opening >= level) or (not upward and opening <= level):
+            return opening
+        if float(row.low) <= level <= float(row.high):
+            return level
+        return None
+
     previous_scheduled_day: date | None = None
     for row_number, row in enumerate(strategy_df.itertuples(index=False)):
         closed_this_candle = False
@@ -142,7 +177,9 @@ def backtest(
 
         price = float(row.close)
         vwap = float(row.anchored_vwap) if pd.notna(row.anchored_vwap) else np.nan
-        anchored_std = float(row.anchored_std) if pd.notna(row.anchored_std) else np.nan
+        if strategy_mode == "VWAP band mean reversion":
+            vwap = float(row.order_vwap)
+        anchored_std = float(row.order_std) if pd.notna(row.order_std) else np.nan
         upper_band = vwap + anchored_std * band_sigma if pd.notna(vwap) and pd.notna(anchored_std) else np.nan
         lower_band = vwap - anchored_std * band_sigma if pd.notna(vwap) and pd.notna(anchored_std) else np.nan
         if trend_mode:
@@ -160,68 +197,34 @@ def backtest(
                 stop_price = entry_price * (1 - stop_loss_pct / 100)
                 target_price = entry_price * (1 + take_profit_pct / 100)
                 if stop_loss_pct > 0 and float(row.low) <= stop_price:
-                    price = stop_price
+                    price = min(stop_price, float(row.open))
                     exit_reason = "Stop loss"
                 elif take_profit_pct > 0 and float(row.high) >= target_price:
-                    price = target_price
+                    price = max(target_price, float(row.open))
                     exit_reason = "Take profit"
                 elif strategy_mode == "AVWAP crossover" and pd.notna(vwap) and price < vwap and previous_close >= previous_vwap:
                     exit_reason = "Close below AVWAP"
-                elif (
-                    strategy_mode == "VWAP band mean reversion"
-                    and pd.notna(long_exit_band)
-                    and (
-                        (
-                            trend_mode
-                            and (
-                                (exit_band_sigma >= band_sigma and float(row.high) >= long_exit_band)
-                                or (exit_band_sigma < band_sigma and float(row.low) <= long_exit_band)
-                            )
-                        )
-                        or (
-                            not trend_mode
-                            and (
-                                (exit_band_sigma <= band_sigma and float(row.high) >= long_exit_band)
-                                or (exit_band_sigma > band_sigma and float(row.low) <= long_exit_band)
-                            )
-                        )
-                    )
-                ):
-                    price = long_exit_band
-                    exit_sign = "+" if trend_mode else "-"
-                    exit_reason = f"Reached {exit_sign}{exit_band_sigma:g}σ exit band"
+                elif strategy_mode == "VWAP band mean reversion":
+                    exit_price = band_fill(row, long_exit_band, exit_band_sigma >= band_sigma if trend_mode else exit_band_sigma <= band_sigma)
+                    if exit_price is not None:
+                        price = exit_price
+                        exit_sign = "+" if trend_mode else "-"
+                        exit_reason = f"Reached {exit_sign}{exit_band_sigma:g}σ exit band"
             else:
                 stop_price = entry_price * (1 + stop_loss_pct / 100)
                 target_price = entry_price * (1 - take_profit_pct / 100)
                 if stop_loss_pct > 0 and float(row.high) >= stop_price:
-                    price = stop_price
+                    price = max(stop_price, float(row.open))
                     exit_reason = "Stop loss"
                 elif take_profit_pct > 0 and float(row.low) <= target_price:
-                    price = target_price
+                    price = min(target_price, float(row.open))
                     exit_reason = "Take profit"
-                elif (
-                    strategy_mode == "VWAP band mean reversion"
-                    and pd.notna(short_exit_band)
-                    and (
-                        (
-                            trend_mode
-                            and (
-                                (exit_band_sigma >= band_sigma and float(row.low) <= short_exit_band)
-                                or (exit_band_sigma < band_sigma and float(row.high) >= short_exit_band)
-                            )
-                        )
-                        or (
-                            not trend_mode
-                            and (
-                                (exit_band_sigma <= band_sigma and float(row.low) <= short_exit_band)
-                                or (exit_band_sigma > band_sigma and float(row.high) >= short_exit_band)
-                            )
-                        )
-                    )
-                ):
-                    price = short_exit_band
-                    exit_sign = "-" if trend_mode else "+"
-                    exit_reason = f"Reached {exit_sign}{exit_band_sigma:g}σ exit band"
+                elif strategy_mode == "VWAP band mean reversion":
+                    exit_price = band_fill(row, short_exit_band, exit_band_sigma < band_sigma if trend_mode else exit_band_sigma > band_sigma)
+                    if exit_price is not None:
+                        price = exit_price
+                        exit_sign = "-" if trend_mode else "+"
+                        exit_reason = f"Reached {exit_sign}{exit_band_sigma:g}σ exit band"
 
             if exit_reason:
                 close_position(price, timestamp, exit_reason)
@@ -239,8 +242,8 @@ def backtest(
                     open_position("Long", price, timestamp)
                     crossed_down_since_exit = False
             else:
-                touched_upper = pd.notna(upper_band) and float(row.high) >= upper_band
-                touched_lower = pd.notna(lower_band) and float(row.low) <= lower_band
+                touched_upper = pd.notna(upper_band) and float(row.low) <= upper_band <= float(row.high)
+                touched_lower = pd.notna(lower_band) and float(row.low) <= lower_band <= float(row.high)
                 if trend_mode:
                     if cash >= minimum_order_size and cash > 0 and touched_lower and open_position_side in {"Short", "Both"}:
                         open_position("Short", lower_band, timestamp)
@@ -252,6 +255,13 @@ def backtest(
                     elif cash >= minimum_order_size and cash > 0 and touched_lower and open_position_side in {"Long", "Both"}:
                         open_position("Long", lower_band, timestamp)
 
+        # Intrabar ordering is unknown: charge a reachable adverse entry-bar
+        # stop, but never award an ambiguous same-bar profit.
+        if strategy_mode == "VWAP band mean reversion" and position_side is not None and entry_time == timestamp and stop_loss_pct > 0:
+            stop_price = entry_price * (1 - stop_loss_pct / 100 if position_side == "Long" else 1 + stop_loss_pct / 100)
+            if (position_side == "Long" and float(row.low) <= stop_price) or (position_side == "Short" and float(row.high) >= stop_price):
+                close_position(stop_price, timestamp, "Stop loss")
+
         is_end_of_scheduled_day = scheduled_days is not None and (
             row_number == len(strategy_df) - 1 or scheduled_days.iloc[row_number + 1] != scheduled_day
         )
@@ -262,7 +272,7 @@ def backtest(
             equity = quantity * float(row.close)
             signed_position = quantity
         elif position_side == "Short":
-            equity = entry_capital + quantity * (entry_price - float(row.close))
+            equity = entry_capital * (1 - fee_pct / 100) + quantity * (entry_price - float(row.close))
             signed_position = -quantity
         else:
             equity = cash

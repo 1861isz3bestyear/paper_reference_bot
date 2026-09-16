@@ -177,7 +177,16 @@ class ReferenceReplicaBot(BybitDemoBot):
         position = self.client.position(self.symbol)
         now = supplied_now or datetime.now(timezone.utc)
         if self.state.halted_reason:
-            return self._flatten_halted(position)
+            action = self._flatten_halted(position)
+            if self.state.halted_reason.startswith("reference target unavailable:"):
+                # This is a diagnostic read only: a healthy producer cannot clear
+                # uncertain exchange orders or the persisted safety halt.
+                try:
+                    self._target(supplied_now)
+                except RuntimeError:
+                    return action + "; current reference unavailable; halt is latched"
+                return action + "; current reference healthy; checked recovery required (bybit_demo_bot.recover)"
+            return action
         try:
             if (not self.target_path.exists() and not position and not self.state.replica_initialized
                     and not self.state.replica_order and not self.state.pending_protection_side):

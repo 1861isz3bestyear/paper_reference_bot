@@ -39,6 +39,7 @@ from live_paper_bot.trading import (
 )
 from shared.indicators import add_launch_weekly_anchored_vwap
 from shared.strategy import backtest
+from shared.hedge_strategy import HEDGE_MODE, process_hedge_history
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +63,7 @@ class StrategyDecision:
 class BotState:
     launched_at: str
     last_processed_candle: str | None = None
+    hedge_state: dict | None = None
     last_successful_market_sync: str | None = None
     latest_cached_candle: str | None = None
     websocket_connected: bool = False
@@ -88,6 +90,8 @@ def calculate_strategy_decision(
     config: PaperBotConfig,
     launched_at: pd.Timestamp,
 ) -> StrategyDecision:
+    if config.strategy_mode == HEDGE_MODE:
+        raise ValueError("VWAP zero hedge uses a two-leg plan, not a single target side.")
     if len(candles) < 2:
         return StrategyDecision(None, None)
     anchor_at = launched_at
@@ -177,7 +181,7 @@ class PaperBot:
             latest_ms = int(cached.iloc[-1]["time"].timestamp() * 1000)
             request_start_ms = max(start_ms, latest_ms - interval_ms)
 
-        cached_times_ms = cached["time"].astype("int64") // 1_000_000 if not cached.empty else pd.Series(dtype="int64")
+        cached_times_ms = cached["time"].dt.as_unit("ns").astype("int64") // 1_000_000 if not cached.empty else pd.Series(dtype="int64")
         cached_has_gap = len(cached_times_ms) > 1 and not cached_times_ms.diff().iloc[1:].eq(interval_ms).all()
         reconcile_rest = reconcile_rest or not has_full_start or cached_has_gap
 
@@ -207,7 +211,7 @@ class PaperBot:
 
         if cached.empty:
             return cached
-        candle_times_ms = cached["time"].astype("int64") // 1_000_000
+        candle_times_ms = cached["time"].dt.as_unit("ns").astype("int64") // 1_000_000
         has_gap = len(candle_times_ms) > 1 and not candle_times_ms.diff().iloc[1:].eq(interval_ms).all()
         first_ms = int(candle_times_ms.iloc[0])
         latest_ms = int(candle_times_ms.iloc[-1])
@@ -231,7 +235,7 @@ class PaperBot:
             )
             self.candle_cache.upsert(self.market_symbol, self.config.timeframe, downloaded)
             cached = self.candle_cache.load(self.market_symbol, self.config.timeframe, start_ms, end_ms)
-            candle_times_ms = cached["time"].astype("int64") // 1_000_000
+            candle_times_ms = cached["time"].dt.as_unit("ns").astype("int64") // 1_000_000
             has_gap = len(candle_times_ms) > 1 and not candle_times_ms.diff().iloc[1:].eq(interval_ms).all()
             first_ms = int(candle_times_ms.iloc[0]) if not cached.empty else -1
             latest_ms = int(candle_times_ms.iloc[-1]) if not cached.empty else -1
@@ -279,6 +283,17 @@ class PaperBot:
         self._last_websocket_generation = generation
         if candles.empty:
             return 0
+        if self.config.strategy_mode != HEDGE_MODE and self.state.hedge_state and (self.state.hedge_state['positions'] or self.state.hedge_state['pending']):
+            raise RuntimeError("Finish the active hedge cycle before changing strategy.")
+        if self.config.strategy_mode == HEDGE_MODE:
+            if self.trader.current_position(self.trade_symbol).side is not None:
+                raise RuntimeError("Close the legacy one-way paper position before starting VWAP zero hedge.")
+            if not hasattr(self, "_hedge_fee_pct"):
+                key, secret = load_bybit_credentials()
+                self._hedge_fee_pct = float(fetch_bybit_taker_fee_rate(key, secret, self.market_symbol)) * 100
+            count = process_hedge_history(self.state, candles, self.config, self.launched_at, self._hedge_fee_pct)
+            self.state.save(self.state_path)
+            return count
         last_processed = pd.Timestamp(self.state.last_processed_candle) if self.state.last_processed_candle else None
         latest_candle_time = pd.Timestamp(candles.iloc[-1]["time"])
         processed = 0
@@ -508,6 +523,13 @@ def status_command(config_path: Path = PAPER_BOT_CONFIG_FILE) -> None:
     if STATE_FILE.is_file():
         print(STATE_FILE.read_text(encoding="utf-8").strip())
     symbol, _, quote_currency = _configured_market(config_path)
+    if STATE_FILE.is_file():
+        hedge = json.loads(STATE_FILE.read_text()).get("hedge_state")
+        if hedge is not None:
+            print(f"Hedge cash: {hedge['cash']:.8f} {quote_currency}")
+            print(f"Hedge positions: {json.dumps(hedge['positions'])}")
+            print(f"Pending hedge entries: {json.dumps(hedge['pending'])}")
+            return
     position = LocalPaperTrader().current_position(symbol)
     print(f"Position: {position.side or 'Flat'} {position.quantity} entry={position.entry_price or 0}")
     deposit_size = float(position.quantity) * (position.entry_price or 0)
@@ -518,7 +540,8 @@ def status_command(config_path: Path = PAPER_BOT_CONFIG_FILE) -> None:
 def stats_command(config_path: Path = PAPER_BOT_CONFIG_FILE) -> None:
     symbol, base_currency, quote_currency = _configured_market(config_path)
     decimals = 2 if quote_currency == "USDT" else 8
-    history = LocalPaperTrader().trade_history(symbol)
+    hedge = json.loads(STATE_FILE.read_text()).get("hedge_state") if STATE_FILE.is_file() else None
+    history = list(reversed(hedge["history"])) if hedge is not None else LocalPaperTrader().trade_history(symbol)
     if not history:
         print("No completed local paper trades.")
         return

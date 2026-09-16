@@ -6,10 +6,12 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from shared.hedge_strategy import HEDGE_MODE
 
 
 def config_fingerprint(config) -> str:
-    return hashlib.sha256(config.to_json().encode()).hexdigest()
+    # Invalidate snapshots produced by the old, noncausal fill engine.
+    return hashlib.sha256(("causal-band-fills-v2\n" + config.to_json()).encode()).hexdigest()
 
 
 def publish_target(path: Path, config, state, position) -> None:
@@ -26,6 +28,10 @@ def publish_target(path: Path, config, state, position) -> None:
         "entry_price": position.entry_price,
         "position_id": position.updated_at if position.side else None,
     }
+    if config.strategy_mode == HEDGE_MODE:
+        payload["version"] = 2
+        payload["strategy_mode"] = HEDGE_MODE
+        payload["hedge_plan"] = (state.hedge_state or {}).get("plan")
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, path)

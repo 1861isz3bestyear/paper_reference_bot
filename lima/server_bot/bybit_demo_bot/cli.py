@@ -37,6 +37,7 @@ class UnprofitableTakeProfit(RuntimeError):
 class DemoState:
     launched_at: str
     last_processed_candle: str | None = None
+    hedge_state: dict | None = None
     pending_protection_side: str | None = None
     pending_take_profit: str | None = None
     halted_reason: str | None = None
@@ -293,11 +294,18 @@ class BybitDemoBot:
         signal.signal(signal.SIGINT, self.stop)
         print(f"{self.EXECUTOR_NAME} executor started: {self.symbol}", flush=True)
         retry_seconds = poll_seconds
+        last_action = None
+        last_action_log = float("-inf")
         while self.running:
             try:
                 action = self.reconcile_once()
-                if action:
+                log_now = time.monotonic()
+                repeated_flat_halt = (action == last_action and action is not None
+                                      and action.startswith("trading halted:") and "exchange position flat" in action)
+                if action and (not repeated_flat_halt or log_now - last_action_log >= 60):
                     print(f"{datetime.now(timezone.utc).isoformat()} {action}", flush=True)
+                    last_action_log = log_now
+                last_action = action
                 retry_seconds = poll_seconds
             except (BybitDemoError, requests.RequestException, RuntimeError, ValueError, KeyError) as exc:
                 if "rate limit" in str(exc).lower() or "HTTP 429" in str(exc):
@@ -377,7 +385,10 @@ def run_demo_command(config_path: Path, env_path: Path, *, resume: bool = False,
             raise RuntimeError("Another Bybit demo bot is running") from None
         state = DemoState.load_or_create(resume)
         from bybit_demo_bot.replica import ReferenceReplicaBot
-        ReferenceReplicaBot(config, client, state).run(min(poll_seconds, 2))
+        from shared.hedge_strategy import HEDGE_MODE
+        from bybit_demo_bot.hedge import HedgeReplicaBot
+        executor = HedgeReplicaBot if config.strategy_mode == HEDGE_MODE else ReferenceReplicaBot
+        executor(config, client, state).run(min(poll_seconds, 2))
 
 
 def parse_args() -> argparse.Namespace:

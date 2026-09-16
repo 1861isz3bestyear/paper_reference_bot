@@ -18,8 +18,14 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["reference_bot", "live_paper_bot", "bybit_demo_bot", "bybit_bot", "server_bot"]
+testpaths = ["reference_bot", "live_paper_bot", "bybit_demo_bot", "bybit_bot", "server_bot", "shared", "tests"]
 python_files = ["test_*.py"]
+markers = [
+    "module: subsystem behavior with real persistence or protocol boundaries",
+    "integration: multiple production components exercised together",
+    "e2e: complete application workflow through external boundaries",
+    "contract: compatibility between independently loaded projects",
+]
 
 [tool.coverage.run]
 omit = ["*/test_*.py"]

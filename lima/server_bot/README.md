@@ -247,3 +247,50 @@ journalctl --user-unit=bybit-demo.service --since "5 minutes ago" -f
 ```
 
 Demo then follows the current reference target; it does not replay trades missed while halted.
+
+### September 2026 calculation and heartbeat corrections
+
+The shared strategy now uses prior-candle bands and requires an actual traded
+entry price, handles opening gaps at exits, charges adverse entry-candle stops,
+and includes both fees in short P&L. Calculator and server strategy sources are
+kept identical. See the calculator's `REALISM_AND_TESTING.md` for assumptions;
+latest reference fills and Bybit market fills still differ from intrabar backtest
+fills. The calculator now selects Bybit linear perpetual data rather than spot.
+
+Reference and live-paper history validation explicitly converts pandas timestamps
+to nanoseconds before computing epoch milliseconds. This avoids rejecting complete
+history when pandas stores timestamps in microseconds or milliseconds. Genuine
+candle gaps still prevent cursor advancement and target publication.
+
+A saved reference halt now reports whether the **current** reference is healthy.
+Repeated unchanged flat-halt messages are limited to once per minute; exchange
+reconciliation continues every poll. Healthy data does not automatically clear
+an uncertain order or a persisted halt: use the checked recovery procedure above.
+
+Update reference and executor together. The target configuration fingerprint now
+includes the revised execution model, so an old-engine snapshot is rejected even
+when the JSON configuration matches. Do not delete account/history files to clear
+a halt. This code change does not repair old trade records or prove the cause of
+the September 15 VPS interruption without the reference journal.
+
+Validation: `uv run pytest` passes 315 tests, including timestamp resolutions
+(ns/us/ms), genuine gaps, stale/healthy diagnostic transitions, checked recovery,
+old-engine snapshot rejection, and throttled logging without reduced polling.
+
+The default suite also includes local HTTP protocol tests and full reference-to-demo
+workflows using real SQLite caches, ledger files, target publication, and demo state.
+They cover restart idempotence, delayed fills, accepted orders with lost responses,
+history failures, stale halts, checked recovery, and concurrent target reads.
+See [workspace testing instructions](../../../../TESTING.md) for the root-level
+`pytest` command and test-level selection.
+
+The calculator and server `shared/` directories are identical. Both default pytest
+suites verify their filenames and file contents byte-for-byte, ignoring generated
+cache files. Apply shared changes to both projects together.
+
+## VWAP zero hedge
+
+The calculator and bots support simultaneous Long/Short limit entries at 0σ,
+symmetric decimal sigma targets, and Position/Deposit stop budgets. See the
+[strategy and configuration guide](../../../../ZERO_HEDGE_STRATEGY.md) for fill timing, allocation,
+expiry, hedge position mode, and restart behavior.

@@ -133,3 +133,39 @@ class BybitDemoClient:
             "category": "linear", "symbol": symbol, "openOnly": 0,
         })
         return bool(result.get("list") or result.get("nextPageCursor"))
+
+    def hedge_positions(self, symbol: str) -> list[dict[str, Any]]:
+        rows = self._request("GET", "/v5/position/list", {"category": "linear", "symbol": symbol}).get("list", [])
+        if any(int(row.get("positionIdx", 0)) == 0 for row in rows):
+            raise BybitDemoError("VWAP zero hedge requires Bybit hedge position mode for this symbol")
+        return [row for row in rows if Decimal(str(row.get("size", 0))) > 0]
+
+    def hedge_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal,
+                          take_profit: Decimal, stop_loss: Decimal, link: str) -> str:
+        values = {"category": "linear", "symbol": symbol, "side": side, "orderType": "Limit",
+                  "qty": format(quantity, "f"), "price": format(price, "f"), "timeInForce": "GTC",
+                  "positionIdx": 1 if side == "Buy" else 2, "orderLinkId": link,
+                  "takeProfit": format(take_profit, "f"), "stopLoss": format(stop_loss, "f"),
+                  "tpslMode": "Full", "tpOrderType": "Market", "slOrderType": "Market"}
+        result = self._request("POST", "/v5/order/create", values)
+        if not result.get("orderId"):
+            raise BybitDemoError("Hedge entry returned no order ID")
+        return str(result["orderId"])
+
+    def hedge_close(self, symbol: str, position: dict) -> None:
+        self._request("POST", "/v5/order/create", {
+            "category": "linear", "symbol": symbol, "side": "Sell" if position["side"] == "Buy" else "Buy",
+            "orderType": "Market", "qty": str(position["size"]), "reduceOnly": True,
+            "positionIdx": int(position["positionIdx"]),
+        })
+
+    def hedge_protection(self, symbol: str, position_idx: int, stop_loss: Decimal, take_profit: Decimal) -> None:
+        try:
+            self._request("POST", "/v5/position/trading-stop", {
+                "category": "linear", "symbol": symbol, "positionIdx": position_idx,
+                "tpslMode": "Full", "stopLoss": format(stop_loss, "f"), "takeProfit": format(take_profit, "f"),
+                "slOrderType": "Market", "tpOrderType": "Market",
+            })
+        except BybitDemoError as exc:
+            if "not modified" not in str(exc).lower():
+                raise

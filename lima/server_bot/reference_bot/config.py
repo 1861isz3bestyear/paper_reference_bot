@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from shared.hedge_strategy import HEDGE_MODE
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -33,19 +35,30 @@ class PaperBotConfig:
     reverse_ticker: bool = False
     open_position_side: str = "Both"
     minimum_order_size: float = 0.01
+    stop_loss_basis: str = "Position"
+    hedge_entry_timeout_bars: int = 3
     open_sigma_1: float | None = None
     close_sigma_1: float | None = None
     open_sigma_2: float | None = None
     close_sigma_2: float | None = None
 
     def validate(self) -> None:
-        if self.strategy_mode not in {"AVWAP crossover", "VWAP band mean reversion"}:
+        if self.strategy_mode not in {"AVWAP crossover", "VWAP band mean reversion", HEDGE_MODE}:
             raise ValueError("Unsupported paper bot strategy mode.")
         if self.timeframe not in SUPPORTED_TIMEFRAMES:
             raise ValueError(f"Paper bot timeframe must be one of {sorted(SUPPORTED_TIMEFRAMES)}.")
-        if not 0.1 <= self.open_order_vwap_sigma <= 3:
+        if self.strategy_mode == HEDGE_MODE:
+            if self.open_order_vwap_sigma != 0 or (not math.isfinite(self.close_order_vwap_sigma) or self.close_order_vwap_sigma <= 0) or self.open_position_side != "Both":
+                raise ValueError("VWAP zero hedge requires entry sigma 0, positive TP sigma, and Both sides.")
+            if self.data_source != "Bybit REST" or self.reverse_ticker:
+                raise ValueError("VWAP zero hedge requires non-reversed Bybit perpetuals.")
+        if self.stop_loss_basis not in {"Position", "Deposit"}:
+            raise ValueError("Stop loss basis must be Position or Deposit.")
+        if not isinstance(self.hedge_entry_timeout_bars, int) or self.hedge_entry_timeout_bars < 1:
+            raise ValueError("Entry timeout must be at least one candle.")
+        if self.strategy_mode != HEDGE_MODE and not 0.1 <= self.open_order_vwap_sigma <= 3:
             raise ValueError("Open-order VWAP sigma must be between 0.1 and 3.")
-        if not 0 <= self.close_order_vwap_sigma <= 3:
+        if self.strategy_mode != HEDGE_MODE and not 0 <= self.close_order_vwap_sigma <= 3:
             raise ValueError("Close-order VWAP sigma must be between 0 and 3.")
         if self.initial_capital <= 0:
             raise ValueError("Initial paper capital must be positive.")
