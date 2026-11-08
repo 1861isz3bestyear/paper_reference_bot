@@ -1,0 +1,68 @@
+name: Debian compatibility
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: debian-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  debian:
+    name: Debian ${{ matrix.debian }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        debian: ["11", "12"]
+    container:
+      image: debian:${{ matrix.debian }}-slim
+    env:
+      UV_PYTHON: "3.14"
+      UV_PYTHON_PREFERENCE: only-managed
+      RUN_SYSTEMD_INTEGRATION: "0"
+    steps:
+      - name: Install OS dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.7"
+          enable-cache: false
+      - name: Install locked application and test dependencies
+        run: uv sync --locked --project server_bot
+      - name: Check installed CLI entry points
+        working-directory: server_bot
+        run: |
+          uv run --locked python -m server_bot.cli --help
+          uv run --locked python -m reference_bot.cli --help
+          uv run --locked python -m live_paper_bot.cli --help
+          uv run --locked python ../install/bot_services.py --help
+      - name: Test application with existing coverage gate
+        working-directory: server_bot
+        run: uv run --locked pytest --junitxml=../test-results/application.xml
+      - name: Test installer and service selection
+        if: ${{ !cancelled() }}
+        working-directory: install
+        run: uv run --locked --project ../server_bot pytest -q test_bot_services.py --junitxml=../test-results/installer.xml
+      - name: Test SMTP monitor
+        if: ${{ !cancelled() }}
+        working-directory: smtp_monitor
+        run: uv run --locked --project ../server_bot pytest -q --cov=monitor --cov-report=term-missing --cov-fail-under=90 --junitxml=../test-results/smtp.xml
+      - name: Upload test reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian-${{ matrix.debian }}-results
+          path: test-results/
+          if-no-files-found: warn
