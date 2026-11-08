@@ -1,17 +1,20 @@
+# Copyright 2026 anchored-vwam-backtest contributors
+"""Implementation of reference bot cli."""
+
 from __future__ import annotations
 
 import argparse
 import fcntl
 import json
 import os
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import textwrap
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -37,11 +40,11 @@ from reference_bot.trading import (
     latest_strategy_side,
     load_bybit_credentials,
 )
-from shared.indicators import add_launch_weekly_anchored_vwap
-from shared.strategy import backtest
+from server_bot.tunnel_runtime import archive_while_running
 from shared.hedge_strategy import HEDGE_MODE, process_hedge_history
+from shared.indicators import add_launch_weekly_anchored_vwap
 from shared.reference_target import publish_target
-
+from shared.strategy import backtest
 
 ROOT = Path(__file__).resolve().parents[1]
 STATE_FILE = ROOT / "reference_state.json"
@@ -49,12 +52,21 @@ PID_FILE = ROOT / "reference_bot.pid"
 LOG_FILE = ROOT / "reference_bot.log"
 CANDLE_CACHE_FILE = ROOT / "reference_candles.sqlite"
 INSTANCE_LOCK_FILE = ROOT / "reference_bot.instance.lock"
-INTERVAL_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
+INTERVAL_MS = {
+    "1m": 60_000,
+    "5m": 300_000,
+    "15m": 900_000,
+    "1h": 3_600_000,
+    "4h": 14_400_000,
+    "1d": 86_400_000,
+}
 REST_RECONCILE_SECONDS = 30 * 60
 
 
 @dataclass(frozen=True)
 class StrategyDecision:
+    """Represent strategy decision."""
+
     side: str | None
     historical_price: float | None
     exit_reason: str | None = None
@@ -62,6 +74,8 @@ class StrategyDecision:
 
 @dataclass
 class BotState:
+    """Represent bot state."""
+
     launched_at: str
     last_processed_candle: str | None = None
     hedge_state: dict | None = None
@@ -74,17 +88,21 @@ class BotState:
     last_websocket_error: str | None = None
 
     @classmethod
-    def load_or_create(cls, path: Path = STATE_FILE) -> "BotState":
+    def load_or_create(cls, path: Path = STATE_FILE) -> BotState:
+        """Load or create."""
         if path.is_file():
             return cls(**json.loads(path.read_text(encoding="utf-8")))
-        state = cls(launched_at=datetime.now(timezone.utc).isoformat())
+        state = cls(launched_at=datetime.now(UTC).isoformat())
         state.save(path)
         return state
 
     def save(self, path: Path = STATE_FILE) -> None:
+        """Save."""
         temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_text(json.dumps(self.__dict__, indent=2) + "\n", encoding="utf-8")
-        os.replace(temporary, path)
+        _ = temporary.write_text(
+            json.dumps(self.__dict__, indent=2) + "\n", encoding="utf-8"
+        )
+        _ = Path(temporary).replace(path)
 
 
 def calculate_strategy_decision(
@@ -92,14 +110,20 @@ def calculate_strategy_decision(
     config: PaperBotConfig,
     launched_at: pd.Timestamp,
 ) -> StrategyDecision:
+    """Calculate strategy decision."""
     if config.strategy_mode == HEDGE_MODE:
-        raise ValueError("VWAP zero hedge uses a two-leg plan, not a single target side.")
+        message = (
+            "VWAP zero hedge uses a two-leg plan, not a single target side."
+        )
+        raise ValueError(message)
     if len(candles) < 2:
         return StrategyDecision(None, None)
     anchor_at = launched_at
     if config.anchor_before_strategy_start:
         anchor_at -= timedelta(days=config.anchor_before_days)
-    data = add_launch_weekly_anchored_vwap(candles, anchor_at, config.vwap_anchor_reset_weeks)
+    data = add_launch_weekly_anchored_vwap(
+        candles, anchor_at, config.vwap_anchor_reset_weeks
+    )
     end = pd.Timestamp(data.iloc[-1]["time"])
     _, trades = backtest(
         data,
@@ -120,26 +144,41 @@ def calculate_strategy_decision(
     side = latest_strategy_side(trades, end)
     if side is not None:
         open_trade = trades[-1]
-        price = float(open_trade.entry_price) if pd.Timestamp(open_trade.entry_time) == end else None
+        price = (
+            float(open_trade.entry_price)
+            if pd.Timestamp(open_trade.entry_time) == end
+            else None
+        )
         return StrategyDecision(side, price)
     if trades:
         closed_trade = trades[-1]
-        if pd.Timestamp(closed_trade.exit_time) == end and closed_trade.exit_reason != "End of strategy":
-            return StrategyDecision(None, float(closed_trade.exit_price), closed_trade.exit_reason)
+        if (
+            pd.Timestamp(closed_trade.exit_time) == end
+            and closed_trade.exit_reason != "End of strategy"
+        ):
+            return StrategyDecision(
+                None, float(closed_trade.exit_price), closed_trade.exit_reason
+            )
     return StrategyDecision(None, None)
 
 
-def calculate_target_side(candles: pd.DataFrame, config: PaperBotConfig, launched_at: pd.Timestamp) -> str | None:
+def calculate_target_side(
+    candles: pd.DataFrame, config: PaperBotConfig, launched_at: pd.Timestamp
+) -> str | None:
+    """Calculate target side."""
     return calculate_strategy_decision(candles, config, launched_at).side
 
 
 class PaperBot:
+    """Represent paper bot."""
+
     def __init__(
         self,
         config_path: Path,
         state_path: Path = STATE_FILE,
         candle_cache_path: Path = CANDLE_CACHE_FILE,
     ) -> None:
+        """Initialize the instance."""
         self.config = PaperBotConfig.load(config_path)
         self.state_path = state_path
         self.state = BotState.load_or_create(state_path)
@@ -148,21 +187,29 @@ class PaperBot:
         self.candle_cache = CandleCache(candle_cache_path)
         self.market_symbol = self.config.ticker.replace("_", "")
         base, quote = self.config.ticker.split("_", maxsplit=1)
-        self.trade_symbol = f"{quote}{base}" if self.config.reverse_ticker else self.market_symbol
+        self.trade_symbol = (
+            f"{quote}{base}"
+            if self.config.reverse_ticker
+            else self.market_symbol
+        )
         self.quote_currency = base if self.config.reverse_ticker else quote
         self.market_feed = (
             BybitKlineWebSocket(
                 self.market_symbol,
                 self.config.timeframe,
-                lambda candles: self.candle_cache.upsert(self.market_symbol, self.config.timeframe, candles),
+                lambda candles: self.candle_cache.upsert(
+                    self.market_symbol, self.config.timeframe, candles
+                ),
             )
             if self.config.data_source == "Bybit REST"
             else RestMarketFeed()
         )
+        self._hedge_fee_pct: float | None = None
         self._last_websocket_generation = 0
         self.running = True
 
     def stop(self, *_: object) -> None:
+        """Stop."""
         self.running = False
 
     def _load_completed_candles(
@@ -174,17 +221,32 @@ class PaperBot:
         interval_ms = INTERVAL_MS[self.config.timeframe]
         start_ms = int(history_start.timestamp() * 1000)
         end_ms = int(now.timestamp() * 1000)
-        expected_first_ms = ((start_ms + interval_ms - 1) // interval_ms) * interval_ms
+        expected_first_ms = (
+            (start_ms + interval_ms - 1) // interval_ms
+        ) * interval_ms
         expected_latest_ms = (end_ms // interval_ms) * interval_ms - interval_ms
-        cached = self.candle_cache.load(self.market_symbol, self.config.timeframe, start_ms, end_ms)
-        has_full_start = not cached.empty and int(cached.iloc[0]["time"].timestamp() * 1000) <= expected_first_ms
+        cached = self.candle_cache.load(
+            self.market_symbol, self.config.timeframe, start_ms, end_ms
+        )
+        has_full_start = (
+            not cached.empty
+            and int(cached.iloc[0]["time"].timestamp() * 1000)
+            <= expected_first_ms
+        )
         request_start_ms = start_ms
         if has_full_start:
             latest_ms = int(cached.iloc[-1]["time"].timestamp() * 1000)
             request_start_ms = max(start_ms, latest_ms - interval_ms)
 
-        cached_times_ms = cached["time"].dt.as_unit("ns").astype("int64") // 1_000_000 if not cached.empty else pd.Series(dtype="int64")
-        cached_has_gap = len(cached_times_ms) > 1 and not cached_times_ms.diff().iloc[1:].eq(interval_ms).all()
+        cached_times_ms = (
+            cached["time"].dt.as_unit("ns").astype("int64") // 1_000_000
+            if not cached.empty
+            else pd.Series(dtype="int64")
+        )
+        cached_has_gap = (
+            len(cached_times_ms) > 1
+            and not cached_times_ms.diff().iloc[1:].eq(interval_ms).all()
+        )
         reconcile_rest = reconcile_rest or not has_full_start or cached_has_gap
 
         download_succeeded = False
@@ -201,27 +263,40 @@ class PaperBot:
                     request_start_ms,
                     end_ms,
                 )
-                self.candle_cache.upsert(self.market_symbol, self.config.timeframe, downloaded)
-                cached = self.candle_cache.load(self.market_symbol, self.config.timeframe, start_ms, end_ms)
-                download_succeeded = True
-            except (requests.RequestException, ValueError):
-                cached_latest_ms = (
-                    int(cached.iloc[-1]["time"].timestamp() * 1000) if not cached.empty else None
+                self.candle_cache.upsert(
+                    self.market_symbol, self.config.timeframe, downloaded
                 )
-                if expected_first_ms <= expected_latest_ms and cached_latest_ms != expected_latest_ms:
+                cached = self.candle_cache.load(
+                    self.market_symbol, self.config.timeframe, start_ms, end_ms
+                )
+                download_succeeded = True
+            except requests.RequestException, ValueError:
+                cached_latest_ms = (
+                    int(cached.iloc[-1]["time"].timestamp() * 1000)
+                    if not cached.empty
+                    else None
+                )
+                if (
+                    expected_first_ms <= expected_latest_ms
+                    and cached_latest_ms != expected_latest_ms
+                ):
                     raise
 
         if cached.empty:
             return cached
-        candle_times_ms = cached["time"].dt.as_unit("ns").astype("int64") // 1_000_000
-        has_gap = len(candle_times_ms) > 1 and not candle_times_ms.diff().iloc[1:].eq(interval_ms).all()
+        candle_times_ms = (
+            cached["time"].dt.as_unit("ns").astype("int64") // 1_000_000
+        )
+        has_gap = (
+            len(candle_times_ms) > 1
+            and not candle_times_ms.diff().iloc[1:].eq(interval_ms).all()
+        )
         first_ms = int(candle_times_ms.iloc[0])
         latest_ms = int(candle_times_ms.iloc[-1])
         incomplete_history = first_ms > expected_first_ms or has_gap
         missing_latest = latest_ms < expected_latest_ms
-        incomplete = (
-            expected_first_ms <= expected_latest_ms
-            and (incomplete_history or (reconcile_rest and missing_latest))
+        incomplete = expected_first_ms <= expected_latest_ms and (
+            incomplete_history or (reconcile_rest and missing_latest)
         )
         if incomplete and request_start_ms != start_ms:
             fetcher = (
@@ -235,19 +310,42 @@ class PaperBot:
                 start_ms,
                 end_ms,
             )
-            self.candle_cache.upsert(self.market_symbol, self.config.timeframe, downloaded)
-            cached = self.candle_cache.load(self.market_symbol, self.config.timeframe, start_ms, end_ms)
-            candle_times_ms = cached["time"].dt.as_unit("ns").astype("int64") // 1_000_000
-            has_gap = len(candle_times_ms) > 1 and not candle_times_ms.diff().iloc[1:].eq(interval_ms).all()
+            self.candle_cache.upsert(
+                self.market_symbol, self.config.timeframe, downloaded
+            )
+            cached = self.candle_cache.load(
+                self.market_symbol, self.config.timeframe, start_ms, end_ms
+            )
+            candle_times_ms = (
+                cached["time"].dt.as_unit("ns").astype("int64") // 1_000_000
+            )
+            has_gap = (
+                len(candle_times_ms) > 1
+                and not candle_times_ms.diff().iloc[1:].eq(interval_ms).all()
+            )
             first_ms = int(candle_times_ms.iloc[0]) if not cached.empty else -1
-            latest_ms = int(candle_times_ms.iloc[-1]) if not cached.empty else -1
-            incomplete = first_ms > expected_first_ms or latest_ms < expected_latest_ms or has_gap
+            latest_ms = (
+                int(candle_times_ms.iloc[-1]) if not cached.empty else -1
+            )
+            incomplete = (
+                first_ms > expected_first_ms
+                or latest_ms < expected_latest_ms
+                or has_gap
+            )
         if incomplete:
-            raise RuntimeError(f"{self.config.data_source} candle history is incomplete; refusing to calculate or advance the cursor.")
+            message = (
+                f"{self.config.data_source} candle history is incomplete;"
+                " refusing to calculate or advance the cursor."
+            )
+            raise RuntimeError(message)
 
         if download_succeeded:
-            self.state.last_successful_market_sync = datetime.now(timezone.utc).isoformat()
-        self.state.latest_cached_candle = pd.Timestamp(cached.iloc[-1]["time"]).isoformat()
+            self.state.last_successful_market_sync = datetime.now(
+                UTC
+            ).isoformat()
+        self.state.latest_cached_candle = pd.Timestamp(
+            cached.iloc[-1]["time"]
+        ).isoformat()
         self.state.save(self.state_path)
         return reverse_candles(cached) if self.config.reverse_ticker else cached
 
@@ -260,55 +358,131 @@ class PaperBot:
         return health.connected, health.connection_generation
 
     def process_available_candles(self) -> int:
-        now = datetime.now(timezone.utc)
+        """Process available candles."""
+        now = datetime.now(UTC)
         history_start = self.launched_at
         if self.config.anchor_before_strategy_start:
             history_start -= timedelta(days=self.config.anchor_before_days)
         websocket_connected, generation = self._update_websocket_health()
         self.state.save(self.state_path)
         last_websocket_message = (
-            pd.Timestamp(self.state.last_websocket_message) if self.state.last_websocket_message else None
+            pd.Timestamp(self.state.last_websocket_message)
+            if self.state.last_websocket_message
+            else None
         )
-        websocket_stale_after = timedelta(seconds=max(120, INTERVAL_MS[self.config.timeframe] // 500))
+        websocket_stale_after = timedelta(
+            seconds=max(120, INTERVAL_MS[self.config.timeframe] // 500)
+        )
         websocket_healthy = (
             websocket_connected
             and last_websocket_message is not None
-            and now - last_websocket_message.to_pydatetime() <= websocket_stale_after
+            and now - last_websocket_message.to_pydatetime()
+            <= websocket_stale_after
         )
-        last_rest_sync = pd.Timestamp(self.state.last_successful_market_sync) if self.state.last_successful_market_sync else None
-        rest_overdue = last_rest_sync is None or now - last_rest_sync.to_pydatetime() >= timedelta(
-            seconds=REST_RECONCILE_SECONDS
+        last_rest_sync = (
+            pd.Timestamp(self.state.last_successful_market_sync)
+            if self.state.last_successful_market_sync
+            else None
+        )
+        rest_overdue = (
+            last_rest_sync is None
+            or now - last_rest_sync.to_pydatetime()
+            >= timedelta(seconds=REST_RECONCILE_SECONDS)
         )
         reconnected = generation != self._last_websocket_generation
-        reconcile_rest = self.config.data_source == "MEXC REST" or not websocket_healthy or rest_overdue or reconnected
-        candles = self._load_completed_candles(history_start, now, reconcile_rest=reconcile_rest)
+        reconcile_rest = (
+            self.config.data_source == "MEXC REST"
+            or not websocket_healthy
+            or rest_overdue
+            or reconnected
+        )
+        candles = self._load_completed_candles(
+            history_start, now, reconcile_rest=reconcile_rest
+        )
         self._last_websocket_generation = generation
         if candles.empty:
             return 0
         margin_state = getattr(self.state, "margin_state", None)
         if self.config.leverage > 1:
-            if self.trader.current_position(self.trade_symbol).side is not None or (self.state.hedge_state and (self.state.hedge_state['positions'] or self.state.hedge_state['pending'])):
-                raise RuntimeError("Close existing unleveraged positions before starting leveraged paper trading.")
+            if self.trader.current_position(
+                self.trade_symbol
+            ).side is not None or (
+                self.state.hedge_state
+                and (
+                    self.state.hedge_state["positions"]
+                    or self.state.hedge_state["pending"]
+                )
+            ):
+                message = (
+                    "Close existing unleveraged positions before starting"
+                    " leveraged paper trading."
+                )
+                raise RuntimeError(message)
             from shared.leverage import process_margin_history
+
             key, secret = load_bybit_credentials()
-            fee_pct = float(fetch_bybit_taker_fee_rate(key, secret, self.market_symbol))*100
-            count = process_margin_history(self.state, candles, self.config, launched_at=self.launched_at, fee_pct=fee_pct)
+            fee_pct = (
+                float(
+                    fetch_bybit_taker_fee_rate(key, secret, self.market_symbol)
+                )
+                * 100
+            )
+            count = process_margin_history(
+                self.state,
+                candles,
+                self.config,
+                launched_at=self.launched_at,
+                fee_pct=fee_pct,
+            )
             self.state.save(self.state_path)
             return count
         if margin_state is not None:
-            raise RuntimeError("Start a fresh paper run before switching from leveraged to unleveraged accounting.")
-        if self.config.strategy_mode != HEDGE_MODE and self.state.hedge_state and (self.state.hedge_state['positions'] or self.state.hedge_state['pending']):
-            raise RuntimeError("Finish the active hedge cycle before changing strategy.")
+            message = (
+                "Start a fresh paper run before switching from leveraged to"
+                " unleveraged accounting."
+            )
+            raise RuntimeError(message)
+        if (
+            self.config.strategy_mode != HEDGE_MODE
+            and self.state.hedge_state
+            and (
+                self.state.hedge_state["positions"]
+                or self.state.hedge_state["pending"]
+            )
+        ):
+            message = "Finish the active hedge cycle before changing strategy."
+            raise RuntimeError(message)
         if self.config.strategy_mode == HEDGE_MODE:
             if self.trader.current_position(self.trade_symbol).side is not None:
-                raise RuntimeError("Close the legacy one-way paper position before starting VWAP zero hedge.")
-            if not hasattr(self, "_hedge_fee_pct"):
+                message = (
+                    "Close the legacy one-way paper position before starting"
+                    " VWAP zero hedge."
+                )
+                raise RuntimeError(message)
+            if self._hedge_fee_pct is None:
                 key, secret = load_bybit_credentials()
-                self._hedge_fee_pct = float(fetch_bybit_taker_fee_rate(key, secret, self.market_symbol)) * 100
-            count = process_hedge_history(self.state, candles, self.config, launched_at=self.launched_at, fee_pct=self._hedge_fee_pct)
+                self._hedge_fee_pct = (
+                    float(
+                        fetch_bybit_taker_fee_rate(
+                            key, secret, self.market_symbol
+                        )
+                    )
+                    * 100
+                )
+            count = process_hedge_history(
+                self.state,
+                candles,
+                self.config,
+                launched_at=self.launched_at,
+                fee_pct=self._hedge_fee_pct,
+            )
             self.state.save(self.state_path)
             return count
-        last_processed = pd.Timestamp(self.state.last_processed_candle) if self.state.last_processed_candle else None
+        last_processed = (
+            pd.Timestamp(self.state.last_processed_candle)
+            if self.state.last_processed_candle
+            else None
+        )
         latest_candle_time = pd.Timestamp(candles.iloc[-1]["time"])
         processed = 0
         for index, candle in candles.iterrows():
@@ -318,12 +492,16 @@ class PaperBot:
             if last_processed is not None and candle_time <= last_processed:
                 continue
             prefix = candles.iloc[: index + 1]
-            decision = calculate_strategy_decision(prefix, self.config, self.launched_at)
+            decision = calculate_strategy_decision(
+                prefix, self.config, self.launched_at
+            )
             target_side = decision.side
             catching_up = candle_time < latest_candle_time
             current = self.trader.current_position(self.trade_symbol)
             stop_triggered = False
-            position_opened_at = pd.Timestamp(current.updated_at) if current.updated_at else None
+            position_opened_at = (
+                pd.Timestamp(current.updated_at) if current.updated_at else None
+            )
             if (
                 not catching_up
                 and current.side is not None
@@ -333,9 +511,13 @@ class PaperBot:
                 and candle_time >= position_opened_at
             ):
                 if current.side == "Long":
-                    stopped = float(candle["low"]) <= current.entry_price * (1 - self.config.stop_loss_pct / 100)
+                    stopped = float(candle["low"]) <= current.entry_price * (
+                        1 - self.config.stop_loss_pct / 100
+                    )
                 else:
-                    stopped = float(candle["high"]) >= current.entry_price * (1 + self.config.stop_loss_pct / 100)
+                    stopped = float(candle["high"]) >= current.entry_price * (
+                        1 + self.config.stop_loss_pct / 100
+                    )
                 if stopped:
                     target_side = None
                     stop_triggered = True
@@ -346,11 +528,15 @@ class PaperBot:
                     processed += 1
                     continue
                 execution_price = (
-                    float(decision.historical_price) if catching_up else self._fetch_execution_price()
+                    float(decision.historical_price)
+                    if catching_up
+                    else self._fetch_execution_price()
                 )
                 if self.config.data_source == "Bybit REST":
                     api_key, api_secret = load_bybit_credentials()
-                    fee_rate = fetch_bybit_taker_fee_rate(api_key, api_secret, self.market_symbol)
+                    fee_rate = fetch_bybit_taker_fee_rate(
+                        api_key, api_secret, self.market_symbol
+                    )
                 else:
                     fee_rate = fetch_mexc_taker_fee_rate(self.market_symbol)
                 allocation = self.config.initial_capital
@@ -359,7 +545,11 @@ class PaperBot:
                         self.trader.available_capital(
                             self.trade_symbol,
                             self.config.initial_capital,
-                            closing_price=execution_price if current.side is not None else None,
+                            closing_price=(
+                                execution_price
+                                if current.side is not None
+                                else None
+                            ),
                             taker_fee_rate=fee_rate,
                         )
                     )
@@ -367,21 +557,47 @@ class PaperBot:
                         target_side = None
                 limits = (
                     fetch_bybit_order_limits(self.market_symbol)
-                    if self.config.data_source == "Bybit REST" and self.market_symbol != "BTCUSDT" else None
+                    if self.config.data_source == "Bybit REST"
+                    and self.market_symbol != "BTCUSDT"
+                    else None
                 )
                 target = self.trader.build_target(
-                    self.trade_symbol, target_side, execution_price, allocation,
-                    **({"quantity_step": limits[0], "minimum_quantity": limits[1], "exchange_minimum_notional": limits[2]} if limits else {}),
+                    self.trade_symbol,
+                    target_side,
+                    execution_price,
+                    allocation,
+                    **(
+                        {
+                            "quantity_step": limits[0],
+                            "minimum_quantity": limits[1],
+                            "exchange_minimum_notional": limits[2],
+                        }
+                        if limits
+                        else {}
+                    ),
                 )
                 action = self.trader.reconcile(
                     self.trade_symbol,
                     target,
                     fee_rate,
-                    exit_reason=(decision.exit_reason if catching_up else "Stop loss" if stop_triggered else None),
-                    executed_at=candle_time.to_pydatetime() if catching_up else None,
+                    exit_reason=(
+                        decision.exit_reason
+                        if catching_up
+                        else "Stop loss" if stop_triggered else None
+                    ),
+                    executed_at=(
+                        candle_time.to_pydatetime() if catching_up else None
+                    ),
                 )
                 if action:
-                    print(f"{datetime.now(timezone.utc).isoformat()} {candle_time.isoformat()} {action}", flush=True)
+                    _ = sys.stdout.write(
+                        str(
+                            f"{datetime.now(UTC).isoformat()}"
+                            f" {candle_time.isoformat()} {action}"
+                        )
+                        + "\n"
+                    )
+                    sys.stdout.flush()
             # This cursor is persisted only after the ledger transition above succeeds.
             self.state.last_processed_candle = candle_time.isoformat()
             self.state.save(self.state_path)
@@ -397,32 +613,58 @@ class PaperBot:
         return 1 / price if self.config.reverse_ticker else price
 
     def run_forever(self) -> None:
-        signal.signal(signal.SIGTERM, self.stop)
-        signal.signal(signal.SIGINT, self.stop)
+        """Run forever."""
+        _ = signal.signal(signal.SIGTERM, self.stop)
+        _ = signal.signal(signal.SIGINT, self.stop)
         retry_seconds = 2
-        poll_seconds = min(60, max(5, INTERVAL_MS[self.config.timeframe] // 4000))
-        capital_decimals = 2 if self.quote_currency == "USDT" else 8
-        print(
-            f"Paper bot launched at {self.state.launched_at}; source={self.config.data_source}; "
-            f"ticker={self.trade_symbol}; timeframe={self.config.timeframe}; "
-            f"initial capital={self.config.initial_capital:.{capital_decimals}f} {self.quote_currency}",
-            flush=True,
+        poll_seconds = min(
+            60, max(5, INTERVAL_MS[self.config.timeframe] // 4000)
         )
+        capital_decimals = 2 if self.quote_currency == "USDT" else 8
+        _ = sys.stdout.write(
+            str(
+                f"Paper bot launched at {self.state.launched_at};"
+                f" source={self.config.data_source};"
+                f" ticker={self.trade_symbol};"
+                f" timeframe={self.config.timeframe}; initial"
+                f" capital={self.config.initial_capital:.{capital_decimals}f}"
+                f" {self.quote_currency}"
+            )
+            + "\n"
+        )
+        sys.stdout.flush()
         self.market_feed.start()
         try:
             while self.running:
                 try:
-                    self.process_available_candles()
+                    _ = self.process_available_candles()
                     # Publish only after all available candles and ledger changes
                     # have been reconciled; followers must not replay catch-up trades.
                     publish_target(
-                        self.state_path.with_name("reference_target.json"), self.config,
-                        self.state, position=self.trader.current_position(self.trade_symbol),
+                        self.state_path.with_name("reference_target.json"),
+                        self.config,
+                        self.state,
+                        position=self.trader.current_position(
+                            self.trade_symbol
+                        ),
                     )
                     retry_seconds = 2
                     self._wait(poll_seconds)
-                except (requests.RequestException, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-                    print(f"{datetime.now(timezone.utc).isoformat()} retrying after error: {exc}", flush=True)
+                except (
+                    requests.RequestException,
+                    RuntimeError,
+                    ValueError,
+                    KeyError,
+                    json.JSONDecodeError,
+                ) as exc:
+                    _ = sys.stdout.write(
+                        str(
+                            f"{datetime.now(UTC).isoformat()} retrying after"
+                            f" error: {exc}"
+                        )
+                        + "\n"
+                    )
+                    sys.stdout.flush()
                     self._wait(retry_seconds)
                     retry_seconds = min(retry_seconds * 2, 60)
         finally:
@@ -435,45 +677,61 @@ class PaperBot:
 
 
 def process_is_running(pid: int) -> bool:
+    """Process is running."""
     try:
         os.kill(pid, 0)
         return True
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError, PermissionError:
         return False
 
 
 def read_pid() -> int | None:
+    """Read pid."""
     try:
         return int(PID_FILE.read_text(encoding="utf-8").strip())
-    except (FileNotFoundError, ValueError):
+    except FileNotFoundError, ValueError:
         return None
 
 
 def run_command(config_path: Path, resume: bool = False) -> None:
+    """Run command."""
     with INSTANCE_LOCK_FILE.open("a+", encoding="utf-8") as instance_lock:
         try:
             fcntl.flock(instance_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise RuntimeError("Another paper bot instance is already running.") from exc
+            message = "Another paper bot instance is already running."
+            raise RuntimeError(message) from exc
         if not resume:
             STATE_FILE.unlink(missing_ok=True)
-        PID_FILE.write_text(f"{os.getpid()}\n", encoding="utf-8")
+        _ = PID_FILE.write_text(f"{os.getpid()}\n", encoding="utf-8")
         try:
-            PaperBot(config_path).run_forever()
+            bot = PaperBot(config_path)
+            with archive_while_running():
+                bot.run_forever()
         finally:
             PID_FILE.unlink(missing_ok=True)
 
 
 def start_command(config_path: Path, resume: bool = False) -> None:
+    """Start command."""
     pid = read_pid()
     if pid and process_is_running(pid):
-        raise RuntimeError(f"Paper bot is already running with PID {pid}.")
-    PaperBotConfig.load(config_path)
+        message = f"Paper bot is already running with PID {pid}."
+        raise RuntimeError(message)
+    _ = PaperBotConfig.load(config_path)
     if not resume:
         STATE_FILE.unlink(missing_ok=True)
     log = LOG_FILE.open("a", encoding="utf-8")
-    subprocess.Popen(
-        [sys.executable, "-m", "reference_bot.cli", "run", "--resume", "--config", str(config_path)],
+    _ = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "reference_bot.cli",
+            "run",
+            "--resume",
+            "--config",
+            str(config_path),
+        ],
         cwd=ROOT,
         stdin=subprocess.DEVNULL,
         stdout=log,
@@ -485,31 +743,41 @@ def start_command(config_path: Path, resume: bool = False) -> None:
         time.sleep(0.1)
         pid = read_pid()
         if pid and process_is_running(pid):
-            print(f"Paper bot started in background with PID {pid}; log: {LOG_FILE}")
+            _ = sys.stdout.write(
+                str(
+                    f"Paper bot started in background with PID {pid}; log:"
+                    f" {LOG_FILE}"
+                )
+                + "\n"
+            )
             return
-    raise RuntimeError(f"Paper bot did not start. Check {LOG_FILE}.")
+    message = f"Paper bot did not start. Check {LOG_FILE}."
+    raise RuntimeError(message)
 
 
 def stop_command() -> None:
+    """Stop command."""
     pid = read_pid()
     if not pid or not process_is_running(pid):
-        print("Paper bot is not running.")
+        _ = sys.stdout.write("Paper bot is not running." + "\n")
         PID_FILE.unlink(missing_ok=True)
         return
     os.kill(pid, signal.SIGTERM)
-    print(f"Stop requested for paper bot PID {pid}.")
+    _ = sys.stdout.write(str(f"Stop requested for paper bot PID {pid}.") + "\n")
 
 
 def reset_command() -> None:
     """Delete local trading history, positions, cursor, and cached candles."""
     pid = read_pid()
     if pid and process_is_running(pid):
-        raise RuntimeError(f"Stop the paper bot before resetting data (PID {pid}).")
+        message = f"Stop the paper bot before resetting data (PID {pid})."
+        raise RuntimeError(message)
     with INSTANCE_LOCK_FILE.open("a+", encoding="utf-8") as instance_lock:
         try:
             fcntl.flock(instance_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise RuntimeError("Stop the paper bot before resetting data.") from exc
+            message = "Stop the paper bot before resetting data."
+            raise RuntimeError(message) from exc
         paths = (
             PAPER_ACCOUNT_FILE,
             PAPER_ACCOUNT_FILE.with_suffix(PAPER_ACCOUNT_FILE.suffix + ".lock"),
@@ -527,77 +795,154 @@ def reset_command() -> None:
         for path in paths:
             path.unlink(missing_ok=True)
     if removed:
-        print(f"Deleted previous paper bot data: {', '.join(removed)}")
+        _ = sys.stdout.write(
+            str(f"Deleted previous paper bot data: {', '.join(removed)}") + "\n"
+        )
     else:
-        print("No previous paper bot data found.")
+        _ = sys.stdout.write("No previous paper bot data found." + "\n")
 
 
-def _configured_market(config_path: Path = PAPER_BOT_CONFIG_FILE) -> tuple[str, str, str]:
+def _configured_market(
+    config_path: Path = PAPER_BOT_CONFIG_FILE,
+) -> tuple[str, str, str]:
     config = PaperBotConfig.load(config_path)
     base, quote = config.ticker.split("_", maxsplit=1)
-    return (f"{quote}{base}", quote, base) if config.reverse_ticker else (f"{base}{quote}", base, quote)
+    return (
+        (f"{quote}{base}", quote, base)
+        if config.reverse_ticker
+        else (f"{base}{quote}", base, quote)
+    )
 
 
 def status_command(config_path: Path = PAPER_BOT_CONFIG_FILE) -> None:
+    """Status command."""
     pid = read_pid()
-    status = f"running (PID {pid})" if pid and process_is_running(pid) else "stopped"
-    print(f"Paper bot: {status}")
+    status = (
+        f"running (PID {pid})" if pid and process_is_running(pid) else "stopped"
+    )
+    _ = sys.stdout.write(str(f"Paper bot: {status}") + "\n")
     if STATE_FILE.is_file():
-        print(STATE_FILE.read_text(encoding="utf-8").strip())
+        _ = sys.stdout.write(
+            str(STATE_FILE.read_text(encoding="utf-8").strip()) + "\n"
+        )
     symbol, _, quote_currency = _configured_market(config_path)
     if STATE_FILE.is_file():
         saved = json.loads(STATE_FILE.read_text())
         margin = saved.get("margin_state")
         if margin is not None:
             from shared.leverage import MarginEngine
+
             engine = MarginEngine(**margin)
-            print(f"Isolated leverage: {engine.settings['leverage']}x; free cash: {engine.cash:.8f} {quote_currency}")
+            _ = sys.stdout.write(
+                str(
+                    f"Isolated leverage: {engine.settings['leverage']}x; free"
+                    f" cash: {engine.cash:.8f} {quote_currency}"
+                )
+                + "\n"
+            )
             if engine.last_mark is not None:
-                print(f"Mark equity: {engine.equity(engine.last_mark):.8f} {quote_currency}")
-            print(f"Positions: {json.dumps(engine.positions)}")
-            print(f"Pending entries: {json.dumps(engine.pending)}")
+                _ = sys.stdout.write(
+                    str(
+                        f"Mark equity: {engine.equity(engine.last_mark):.8f}"
+                        f" {quote_currency}"
+                    )
+                    + "\n"
+                )
+            _ = sys.stdout.write(
+                str(f"Positions: {json.dumps(engine.positions)}") + "\n"
+            )
+            _ = sys.stdout.write(
+                str(f"Pending entries: {json.dumps(engine.pending)}") + "\n"
+            )
             return
         hedge = saved.get("hedge_state")
         if hedge is not None:
-            print(f"Hedge cash: {hedge['cash']:.8f} {quote_currency}")
-            print(f"Hedge positions: {json.dumps(hedge['positions'])}")
-            print(f"Pending hedge entries: {json.dumps(hedge['pending'])}")
+            _ = sys.stdout.write(
+                str(f"Hedge cash: {hedge['cash']:.8f} {quote_currency}") + "\n"
+            )
+            _ = sys.stdout.write(
+                str(f"Hedge positions: {json.dumps(hedge['positions'])}") + "\n"
+            )
+            _ = sys.stdout.write(
+                str(f"Pending hedge entries: {json.dumps(hedge['pending'])}")
+                + "\n"
+            )
             return
     position = LocalPaperTrader().current_position(symbol)
-    print(f"Position: {position.side or 'Flat'} {position.quantity} entry={position.entry_price or 0}")
+    _ = sys.stdout.write(
+        str(
+            f"Position: {position.side or 'Flat'} {position.quantity}"
+            f" entry={position.entry_price or 0}"
+        )
+        + "\n"
+    )
     deposit_size = float(position.quantity) * (position.entry_price or 0)
     decimals = 2 if quote_currency == "USDT" else 8
-    print(f"Deposit size: {deposit_size:.{decimals}f} {quote_currency}")
+    _ = sys.stdout.write(
+        str(f"Deposit size: {deposit_size:.{decimals}f} {quote_currency}")
+        + "\n"
+    )
 
 
 def stats_command(config_path: Path = PAPER_BOT_CONFIG_FILE) -> None:
+    """Stats command."""
     symbol, base_currency, quote_currency = _configured_market(config_path)
     decimals = 2 if quote_currency == "USDT" else 8
-    hedge = json.loads(STATE_FILE.read_text()).get("hedge_state") if STATE_FILE.is_file() else None
-    margin = json.loads(STATE_FILE.read_text()).get("margin_state") if STATE_FILE.is_file() else None
+    hedge = (
+        json.loads(STATE_FILE.read_text()).get("hedge_state")
+        if STATE_FILE.is_file()
+        else None
+    )
+    margin = (
+        json.loads(STATE_FILE.read_text()).get("margin_state")
+        if STATE_FILE.is_file()
+        else None
+    )
     ledger = margin if margin is not None else hedge
-    history = list(reversed(ledger["history"])) if ledger is not None else LocalPaperTrader().trade_history(symbol)
+    history = (
+        list(reversed(ledger["history"]))
+        if ledger is not None
+        else LocalPaperTrader().trade_history(symbol)
+    )
     if not history:
-        print("No completed local paper trades.")
+        _ = sys.stdout.write("No completed local paper trades." + "\n")
         return
-    width = max(40, min(shutil.get_terminal_size(fallback=(100, 24)).columns, 100))
+    width = max(
+        40, min(shutil.get_terminal_size(fallback=(100, 24)).columns, 100)
+    )
 
     def line(value: str) -> None:
-        print(textwrap.fill(value, width=width, subsequent_indent="    "))
+        """Line."""
+        _ = sys.stdout.write(
+            str(textwrap.fill(value, width=width, subsequent_indent="    "))
+            + "\n"
+        )
 
-    pnl = pd.to_numeric(pd.Series([trade.get("pnl", 0) for trade in history]), errors="coerce").fillna(0)
+    pnl = pd.to_numeric(
+        pd.Series([trade.get("pnl", 0) for trade in history]), errors="coerce"
+    ).fillna(0)
     line(
-        f"Completed trades: {len(history)} | Net P&L: {pnl.sum():.8f} {quote_currency} | "
-        f"Win rate: {(pnl.gt(0).mean() * 100):.2f}%"
+        f"Completed trades: {len(history)} | Net P&L: {pnl.sum():.8f}"
+        f" {quote_currency} | Win rate: {(pnl.gt(0).mean() * 100):.2f}%"
     )
-    print("Newest trade first.")
+    _ = sys.stdout.write("Newest trade first." + "\n")
     for number, trade in enumerate(history, start=1):
         print()
         line(f"Trade {number}: {trade.get('side', 'Unknown')}")
-        line(f"  Entry: {trade.get('entry_time', '-')} | price {float(trade.get('entry_price', 0)):.2f}")
-        line(f"  Exit:  {trade.get('exit_time', '-')} | price {float(trade.get('exit_price', 0)):.2f}")
+        line(
+            f"  Entry: {trade.get('entry_time', '-')} | price"
+            f" {float(trade.get('entry_price', 0)):.2f}"
+        )
+        line(
+            f"  Exit:  {trade.get('exit_time', '-')} | price"
+            f" {float(trade.get('exit_price', 0)):.2f}"
+        )
         line(f"  Quantity: {trade.get('quantity', 0)} {base_currency}")
-        line(f"  Deposit size: {float(trade.get('deposit_size', 0)):.{decimals}f} {quote_currency}")
+        line(
+            "  Deposit size:"
+            f" {float(trade.get('deposit_size', 0)):.{decimals}f}"
+            f" {quote_currency}"
+        )
         line(
             f"  Fees: entry {float(trade.get('entry_fee', 0)):.4f} | "
             f"exit {float(trade.get('exit_fee', 0)):.8f} {quote_currency}"
@@ -607,27 +952,50 @@ def stats_command(config_path: Path = PAPER_BOT_CONFIG_FILE) -> None:
             f"return {float(trade.get('return_pct', 0)):.2f}%"
         )
         if trade.get("leverage", 1) > 1:
-            line(f"  Leverage: {trade['leverage']}x | Margin: {trade['margin']:.8f} | Entry notional: {trade['entry_notional']:.8f}")
-            line(f"  Funding paid: {trade['funding_paid']:.8f} | Liquidation adjustment: {trade['liquidation_adjustment']:.8f} {quote_currency}")
+            line(
+                f"  Leverage: {trade['leverage']}x | Margin:"
+                f" {trade['margin']:.8f} | Entry notional:"
+                f" {trade['entry_notional']:.8f}"
+            )
+            line(
+                f"  Funding paid: {trade['funding_paid']:.8f} | Liquidation"
+                f" adjustment: {trade['liquidation_adjustment']:.8f}"
+                f" {quote_currency}"
+            )
         line(f"  Exit reason: {trade.get('exit_reason', '-')}")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Persistent local-only Bybit-data paper trading bot")
+    """Parse args."""
+    parser = argparse.ArgumentParser(
+        description="Persistent local-only Bybit-data paper trading bot"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("run", "start"):
         subparser = subparsers.add_parser(command)
-        subparser.add_argument("--config", type=Path, default=PAPER_BOT_CONFIG_FILE)
-        subparser.add_argument("--resume", action="store_true", help="Resume the prior launch anchor and candle cursor.")
-    subparsers.add_parser("stop")
-    subparsers.add_parser("reset", help="Delete positions, trade history, state, and cached candles.")
+        _ = subparser.add_argument(
+            "--config", type=Path, default=PAPER_BOT_CONFIG_FILE
+        )
+        _ = subparser.add_argument(
+            "--resume",
+            action="store_true",
+            help="Resume the prior launch anchor and candle cursor.",
+        )
+    _ = subparsers.add_parser("stop")
+    _ = subparsers.add_parser(
+        "reset",
+        help="Delete positions, trade history, state, and cached candles.",
+    )
     for command in ("status", "stats"):
         subparser = subparsers.add_parser(command)
-        subparser.add_argument("--config", type=Path, default=PAPER_BOT_CONFIG_FILE)
+        _ = subparser.add_argument(
+            "--config", type=Path, default=PAPER_BOT_CONFIG_FILE
+        )
     return parser.parse_args()
 
 
 def main() -> None:
+    """Main."""
     args = parse_args()
     try:
         if args.command == "run":
@@ -644,7 +1012,8 @@ def main() -> None:
             stats_command(args.config)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
-        raise SystemExit(1) from exc
+        message = 1
+        raise SystemExit(message) from exc
 
 
 if __name__ == "__main__":

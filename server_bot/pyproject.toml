@@ -13,11 +13,17 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "basedpyright>=1.40.2",
+    "black==26.5.1",
+    "pandas-stubs>=3.1.0.261029",
     "pytest>=8.3.0",
     "pytest-cov>=6.0.0",
+    "ruff>=0.17.4",
+    "types-requests>=2.33.0.20261030",
 ]
 
 [tool.pytest.ini_options]
+addopts = "--cov --cov-report=term-missing"
 testpaths = ["reference_bot", "live_paper_bot", "bybit_demo_bot", "bybit_bot", "server_bot", "shared", "tests"]
 python_files = ["test_*.py"]
 markers = [
@@ -28,7 +34,64 @@ markers = [
 ]
 
 [tool.coverage.run]
+branch = true
+source = ["reference_bot", "live_paper_bot", "bybit_demo_bot", "bybit_bot", "server_bot", "shared"]
 omit = ["*/test_*.py"]
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 92
+precision = 2
+
+[tool.black]
+line-length = 80
+target-version = ["py314"]
+preview = true
+unstable = true
+
+[tool.ruff]
+line-length = 80
+target-version = "py314"
+preview = true
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    # D203 requires a blank line before class docstrings; D211 forbids it.
+    "incorrect-blank-line-before-class",
+    # D213 requires summaries on line two; D212 requires the first line.
+    "multi-line-summary-second-line",
+    # Black controls trailing commas and can remove a comma COM812 requires.
+    "missing-trailing-comma",
+    # Black can emit adjacent string literals on the same line.
+    "single-line-implicit-string-concatenation",
+    # Explicit re-export aliases are required by the type checker.
+    "useless-import-alias",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 5
+max-positional-args = 3
+max-branches = 12
+max-locals = 15
+max-statements = 50
+max-returns = 6
+max-bool-expr = 5
+max-nested-blocks = 3
+
+[tool.basedpyright]
+pythonVersion = "3.14"
+pythonPlatform = "All"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "all"
+failOnWarnings = true
+reportAny = "error"
+reportExplicitAny = "error"
+enableTypeIgnoreComments = false
+reportIgnoreCommentWithoutRule = "error"
+reportUnnecessaryTypeIgnoreComment = "error"
+# Black emits adjacent string literals when wrapping text.
+reportImplicitStringConcatenation = "none"

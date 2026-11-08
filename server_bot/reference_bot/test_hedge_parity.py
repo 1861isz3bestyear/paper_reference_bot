@@ -51,7 +51,8 @@ def test_streaming_and_backtest_use_same_closed_trade_accounting() -> None:
             launched_at=pd.to_datetime(raw["time"], utc=True).iloc[0],
             fee_pct=0.1,
         )
-    assert state.hedge_state is not None
+    if not ((state.hedge_state) is not (None)):
+        pytest.fail("Expected state.hedge_state is not None")
     streaming = HedgeEngine(**state.hedge_state)
     streaming.close_all(
         raw["close"].astype(float).iloc[-1],
@@ -75,10 +76,15 @@ def test_streaming_and_backtest_use_same_closed_trade_accounting() -> None:
         exit_band_sigma=1.2,
         minimum_order_size=0.01,
     )
-    assert trades == streaming.trades()
-    assert eq["equity"].astype(float).iloc[-1] == pytest.approx(streaming.cash)
+    if trades != streaming.trades():
+        pytest.fail("Expected trades == streaming.trades()")
+    if eq["equity"].astype(float).iloc[-1] != pytest.approx(streaming.cash):
+        pytest.fail(
+            "Expected eq['equity'].astype(float).iloc[-1] =="
+            " pytest.approx(streaming.cash)"
+        )
     before = state.hedge_state
-    assert (
+    if (
         process_hedge_history(
             state,
             raw,
@@ -86,7 +92,12 @@ def test_streaming_and_backtest_use_same_closed_trade_accounting() -> None:
             launched_at=pd.to_datetime(raw["time"], utc=True).iloc[0],
             fee_pct=0.1,
         )
-        == 0
-    )
-    assert state.hedge_state == before
-
+        != 0
+    ):
+        pytest.fail(
+            "Expected process_hedge_history(state, raw, cfg,"
+            " launched_at=pd.to_datetime(raw['time'], utc=True).iloc[0],"
+            " fee_pct=0.1) == 0"
+        )
+    if state.hedge_state != before:
+        pytest.fail("Expected state.hedge_state == before")

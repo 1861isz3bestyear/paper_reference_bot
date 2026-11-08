@@ -19,6 +19,18 @@ uv sync --locked
 uv run pytest
 ```
 
+The default test run enforces at least **92% combined line/branch coverage**
+across all production modules in `reference_bot`, `live_paper_bot`,
+`bybit_demo_bot`, `bybit_bot`, `server_bot`, and `shared`, including modules
+that are not imported by the tests. Test files are omitted from measurement.
+Coverage failures return a nonzero exit status even when every test passes.
+Use `uv run pytest --cov-report=html` for a browsable missing-coverage report.
+
+Backtest is the source of truth for `shared/`. The default suite checks that
+paper's shared filenames and contents match backtest byte for byte. Shared
+behavior tests also cover configuration persistence, causal open interest,
+VWAP reset boundaries, tunnel execution and nested hedge state recovery.
+
 Copy and edit the shared configuration if needed:
 
 ```bash
@@ -318,3 +330,45 @@ running bot; stop the paper processes before starting with a different config.
 
 The demo executor prefers `bybitdemoapi.env`, with `bybitapidemo.env` as a legacy fallback.
 The demo loader accepts `BYBIT_API_KEY` / `BYBIT_API_SECRET` and `API_KEY` / `SECRET_API_KEY`.
+
+### Snapshot tunnel input archive
+
+Run the independent data collector from this directory:
+
+```bash
+uv run python -m server_bot.tunnel_archive --output tunnel_inputs.sqlite
+# One collection pass (nonzero exit if a source fails):
+uv run python -m server_bot.tunnel_archive --once
+```
+
+It records BTC (or `--asset ETH`) Deribit option instruments, option summaries
+and index price; Bybit top-50 linear depth, recent minute/hour candles, hourly
+open interest, and USDT margin-rate history. Set `BYBIT_API_KEY` and
+`BYBIT_API_SECRET` with margin read access for the authenticated rate endpoint.
+The collector never submits orders. The default polling interval is 60 seconds;
+use `--poll-seconds` to change it.
+
+SQLite `tunnel_inputs` retains each raw JSON response, source, asset, request
+time, receipt/availability time and error type, including repeated observations
+across restarts. Each source commits independently, so unavailable margin data
+cannot discard options or depth. Failed HTTP responses retain their bodies.
+Credentials and request headers are not stored.
+
+This is a raw archive, not the GUI snapshot database or a trading runner.
+Replay consumers must validate payload rows, join instrument definitions with
+summaries, and use receipt times to avoid future knowledge. Each pass saves the
+latest API window (1000 candles per interval and 200 hourly OI points); it does
+not backfill gaps or paginate historical OI. Current candles may be unfinished.
+Chain requests are sequential observations, not an atomic exchange snapshot.
+Continuous collection is required for historical option chains and depth.
+
+The archive also starts automatically alongside every reference, live-paper,
+Bybit demo and mainnet bot run, including launches through `server_bot.cli start`
+and the installed systemd services. It writes BTC inputs to
+`tunnel_inputs.sqlite` in the server project directory every 60 seconds.
+A shared `tunnel_inputs.lock` serializes polls and preserves the polling cadence
+across bot restarts. Collection runs in a background thread and stops with its
+bot; another running bot continues polling. Archive errors are logged without
+interrupting trading. The archive survives bot resets. Margin credentials must
+be present in the process environment; executor-specific env files are not
+implicitly reused for the mainnet margin endpoint.

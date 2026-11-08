@@ -1,9 +1,11 @@
+# Copyright 2026 anchored-vwam-backtest contributors
+"""Implementation of bybit bot client."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from bybit_demo_bot.client import BybitDemoClient, BybitDemoError
-
 
 BybitError = BybitDemoError
 

@@ -1,14 +1,18 @@
+# Copyright 2026 anchored-vwam-backtest contributors
+"""Implementation of bybit demo bot cli."""
+
 from __future__ import annotations
 
 import argparse
 import fcntl
 import json
-import os
+import logging
 import signal
+import sys
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal, ROUND_DOWN
+from datetime import UTC, datetime, timedelta
+from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
 
 import pandas as pd
@@ -16,15 +20,18 @@ import requests
 
 from bybit_demo_bot.client import BybitDemoClient, BybitDemoError
 from live_paper_bot.cli import calculate_strategy_decision
-from reference_bot.cli import calculate_strategy_decision as reference_decision
 from live_paper_bot.market import fetch_completed_linear_klines
+from reference_bot.cli import calculate_strategy_decision as reference_decision
 from reference_bot.config import (
     BYBIT_TICKERS,
     PAPER_BOT_CONFIG_FILE,
     PaperBotConfig,
 )
+from server_bot.tunnel_runtime import archive_while_running
 from shared.env import load_env, setting
 from shared.indicators import add_launch_weekly_anchored_vwap
+
+LOGGER = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = ROOT / "bybitdemoapi.env"
@@ -48,6 +55,8 @@ class UnprofitableTakeProfit(RuntimeError):
 
 @dataclass
 class DemoState:
+    """Represent demo state."""
+
     launched_at: str
     last_processed_candle: str | None = None
     hedge_state: dict | None = None
@@ -62,7 +71,8 @@ class DemoState:
     replica_order: dict | None = None
 
     @classmethod
-    def load_or_create(cls, resume: bool) -> "DemoState":
+    def load_or_create(cls, resume: bool) -> DemoState:
+        """Load or create."""
         if resume and STATE_FILE.is_file():
             try:
                 data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -73,22 +83,24 @@ class DemoState:
                     data["consumed_signal_side"] = "legacy"
                 return cls(**data)
             except (OSError, TypeError, json.JSONDecodeError) as exc:
-                raise RuntimeError(
-                    f"Cannot read {STATE_FILE.name}: {exc}"
-                ) from None
-        state = cls(datetime.now(timezone.utc).isoformat())
+                message = f"Cannot read {STATE_FILE.name}: {exc}"
+                raise RuntimeError(message) from None
+        state = cls(datetime.now(UTC).isoformat())
         state.save()
         return state
 
     def save(self) -> None:
+        """Save."""
         temporary = STATE_FILE.with_suffix(".json.tmp")
-        temporary.write_text(
+        _ = temporary.write_text(
             json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8"
         )
-        os.replace(temporary, STATE_FILE)
+        _ = Path(temporary).replace(STATE_FILE)
 
 
 class BybitDemoBot:
+    """Represent bybit demo bot."""
+
     MAX_RETRY_SECONDS = 300
     REFERENCE_ALIGNED = False
     EXECUTOR_NAME = "Bybit DEMO"
@@ -97,26 +109,30 @@ class BybitDemoBot:
     def __init__(
         self, config: PaperBotConfig, client: BybitDemoClient, state: DemoState
     ) -> None:
+        """Initialize the instance."""
         if (
             config.data_source != "Bybit REST"
             or config.reverse_ticker
             or config.ticker not in BYBIT_TICKERS
         ):
-            raise ValueError(
+            message = (
                 "Bybit demo requires a non-reversed Bybit REST ticker from"
                 f" {sorted(BYBIT_TICKERS)}"
             )
+            raise ValueError(message)
         if config.leverage > 1:
-            raise ValueError(
+            message = (
                 "Leveraged configs currently support local Lima paper"
                 " simulation only; exchange demo/mainnet execution is not"
                 " supported."
             )
+            raise ValueError(message)
         self.config, self.client, self.state = config, client, state
         self.symbol, self.running = config.ticker.replace("_", ""), True
         self._candles = pd.DataFrame()
 
     def stop(self, *_: object) -> None:
+        """Stop."""
         self.running = False
 
     @staticmethod
@@ -139,10 +155,11 @@ class BybitDemoBot:
             minimum_notional, Decimal(str(self.config.minimum_order_size))
         )
         if quantity < minimum or quantity * price < required_notional:
-            raise RuntimeError(
+            message = (
                 f"{self.ACCOUNT_NAME} order is below configured or exchange"
                 " minimum"
             )
+            raise RuntimeError(message)
         return quantity
 
     def _exit_band(
@@ -161,7 +178,8 @@ class BybitDemoBot:
         )
         sigma = Decimal(str(self.config.close_order_vwap_sigma))
         if pd.isna(row["anchored_vwap"]) or pd.isna(row["anchored_std"]):
-            raise RuntimeError("VWAP close band is unavailable for take profit")
+            message = "VWAP close band is unavailable for take profit"
+            raise RuntimeError(message)
         if self.config.trend:
             return vwap + std * sigma if side == "Buy" else vwap - std * sigma
         return vwap - std * sigma if side == "Buy" else vwap + std * sigma
@@ -175,10 +193,11 @@ class BybitDemoBot:
         loss = Decimal(str(self.config.stop_loss_pct)) / 100
         stop = entry * (1 - loss if side == "Buy" else 1 + loss)
         if not self._take_profit_is_profitable(side, entry, take_profit):
-            raise UnprofitableTakeProfit(
+            message = (
                 f"VWAP close-band take profit {take_profit} is not profitable"
                 f" from {side} entry {entry}"
             )
+            raise UnprofitableTakeProfit(message)
         self.client.set_protection(self.symbol, stop, take_profit)
         self.state.pending_protection_side = None
         self.state.pending_take_profit = None
@@ -192,8 +211,10 @@ class BybitDemoBot:
         return take_profit > entry if side == "Buy" else take_profit < entry
 
     def reconcile_once(self, now: datetime | None = None) -> str | None:
+        """Reconcile once."""
         if self.state.halted_reason:
-            raise RuntimeError(f"trading halted: {self.state.halted_reason}")
+            message = f"trading halted: {self.state.halted_reason}"
+            raise RuntimeError(message)
         # A newly submitted order must be reconciled immediately, without
         # waiting for another completed strategy candle.
         if self.state.pending_protection_side:
@@ -203,23 +224,23 @@ class BybitDemoBot:
         if self.state.pending_protection_side and position:
             try:
                 if self.REFERENCE_ALIGNED:
-                    return self._protect(position, Decimal("0"))
+                    return self._protect(position, Decimal(0))
                 if self.state.pending_take_profit is None:
-                    raise RuntimeError(
-                        "pending VWAP take-profit price is missing"
-                    )
+                    message = "pending VWAP take-profit price is missing"
+                    raise RuntimeError(message)
                 return self._protect(
                     position, Decimal(self.state.pending_take_profit)
                 )
             except UnprofitableTakeProfit as exc:
                 try:
-                    self.client.market_order(
+                    _ = self.client.market_order(
                         self.symbol,
                         "Sell" if position["side"] == "Buy" else "Buy",
                         Decimal(str(position["size"])),
                         reduce_only=True,
                     )
                 except Exception as close_exc:
+                    LOGGER.exception("Emergency position close failed")
                     self.state.halted_reason = (
                         f"invalid entry protection ({exc}); emergency close"
                         f" failed ({close_exc})"
@@ -235,13 +256,14 @@ class BybitDemoBot:
                 )
             except Exception as exc:
                 try:
-                    self.client.market_order(
+                    _ = self.client.market_order(
                         self.symbol,
                         "Sell" if position["side"] == "Buy" else "Buy",
                         Decimal(str(position["size"])),
                         reduce_only=True,
                     )
                 except Exception as close_exc:
+                    LOGGER.exception("Emergency position close failed")
                     self.state.halted_reason = (
                         f"protection failed ({exc}); emergency close failed"
                         f" ({close_exc})"
@@ -257,7 +279,7 @@ class BybitDemoBot:
             return (
                 "awaiting entry reconciliation; no additional order submitted"
             )
-        current = pd.Timestamp(now or datetime.now(timezone.utc))
+        current = pd.Timestamp(now or datetime.now(UTC))
         interval = INTERVAL_SECONDS[self.config.timeframe]
         end_ms = int(current.timestamp() * 1000)
         latest_ms = (
@@ -301,7 +323,8 @@ class BybitDemoBot:
                 pd.to_datetime(candles["time"], utc=True) >= start
             ].reset_index(drop=True)
         if candles.empty or pd.Timestamp(candles.iloc[-1]["time"]) != latest:
-            raise RuntimeError("completed Bybit candle history is not current")
+            message = "completed Bybit candle history is not current"
+            raise RuntimeError(message)
         self._candles = candles
         if position is None:
             position = self.client.position(self.symbol)
@@ -310,13 +333,16 @@ class BybitDemoBot:
             self.state.observed_position_side and observed is None
         )
         if exchange_closed:
-            print(
-                f"{datetime.now(timezone.utc).isoformat()} observed"
-                f" {self.state.observed_position_side} position closed on"
-                " exchange; consult execution history for fill and exit"
-                " reason",
-                flush=True,
+            _ = sys.stdout.write(
+                str(
+                    f"{datetime.now(UTC).isoformat()} observed"
+                    f" {self.state.observed_position_side} position closed on"
+                    " exchange; consult execution history for fill and exit"
+                    " reason"
+                )
+                + "\n"
             )
+            sys.stdout.flush()
         self.state.observed_position_side = observed
         if self.REFERENCE_ALIGNED:
             if exchange_closed and not self.state.pending_strategy_close:
@@ -355,7 +381,7 @@ class BybitDemoBot:
         self.state.save()
         actions = []
         if position and existing != desired:
-            self.client.market_order(
+            _ = self.client.market_order(
                 self.symbol,
                 "Sell" if existing == "Buy" else "Buy",
                 Decimal(str(position["size"])),
@@ -392,7 +418,7 @@ class BybitDemoBot:
                 self.state.pending_protection_side = desired
                 self.state.pending_take_profit = format(take_profit, "f")
                 self.state.save()
-                self.client.market_order(self.symbol, desired, quantity)
+                _ = self.client.market_order(self.symbol, desired, quantity)
                 actions.append(
                     f"opened {desired}; awaiting fill for protection"
                 )
@@ -400,7 +426,7 @@ class BybitDemoBot:
             take_profit = self._exit_band(candles, launched, desired)
             entry = Decimal(str(position["avgPrice"]))
             if self._take_profit_is_profitable(desired, entry, take_profit):
-                self._protect(position, take_profit)
+                _ = self._protect(position, take_profit)
                 actions.append(
                     f"updated {desired} protection to current VWAP close band"
                 )
@@ -414,11 +440,13 @@ class BybitDemoBot:
         return "; ".join(actions) or None
 
     def run(self, poll_seconds: int) -> None:
-        signal.signal(signal.SIGTERM, self.stop)
-        signal.signal(signal.SIGINT, self.stop)
-        print(
-            f"{self.EXECUTOR_NAME} executor started: {self.symbol}", flush=True
+        """Run."""
+        _ = signal.signal(signal.SIGTERM, self.stop)
+        _ = signal.signal(signal.SIGINT, self.stop)
+        _ = sys.stdout.write(
+            str(f"{self.EXECUTOR_NAME} executor started: {self.symbol}") + "\n"
         )
+        sys.stdout.flush()
         retry_seconds = poll_seconds
         last_action = None
         last_action_log = float("-inf")
@@ -435,10 +463,10 @@ class BybitDemoBot:
                 if action and (
                     not repeated_flat_halt or log_now - last_action_log >= 60
                 ):
-                    print(
-                        f"{datetime.now(timezone.utc).isoformat()} {action}",
-                        flush=True,
+                    _ = sys.stdout.write(
+                        str(f"{datetime.now(UTC).isoformat()} {action}") + "\n"
                     )
+                    sys.stdout.flush()
                     last_action_log = log_now
                 last_action = action
                 retry_seconds = poll_seconds
@@ -451,11 +479,14 @@ class BybitDemoBot:
             ) as exc:
                 if "rate limit" in str(exc).lower() or "HTTP 429" in str(exc):
                     retry_seconds = max(retry_seconds, 60)
-                print(
-                    f"{datetime.now(timezone.utc).isoformat()} reconciliation"
-                    f" error; retrying in {retry_seconds}s: {exc}",
-                    flush=True,
+                _ = sys.stdout.write(
+                    str(
+                        f"{datetime.now(UTC).isoformat()} reconciliation"
+                        f" error; retrying in {retry_seconds}s: {exc}"
+                    )
+                    + "\n"
                 )
+                sys.stdout.flush()
                 wait_seconds = retry_seconds
                 retry_seconds = min(retry_seconds * 2, self.MAX_RETRY_SECONDS)
             else:
@@ -480,10 +511,10 @@ class ReferenceAlignedDemoBot(BybitDemoBot):
         stop = (
             entry * (1 - loss if position["side"] == "Buy" else 1 + loss)
             if loss > 0
-            else Decimal("0")
+            else Decimal(0)
         )
         # Zero removes an exchange TP left by the previous executor.
-        self.client.set_protection(self.symbol, stop, Decimal("0"))
+        self.client.set_protection(self.symbol, stop, Decimal(0))
         self.state.observed_position_side = str(position["side"])
         self.state.pending_protection_side = None
         self.state.pending_take_profit = None
@@ -493,13 +524,14 @@ class ReferenceAlignedDemoBot(BybitDemoBot):
     def reconcile_reference_position(
         self, position, desired, latest
     ) -> str | None:
+        """Reconcile reference position."""
         existing = str(position["side"]) if position else None
         if position and existing != desired:
             # Distinguish our own strategy exits/reversals from exchange stops.
             # Persist before submission because the response may be ambiguous.
             self.state.pending_strategy_close = True
             self.state.save()
-            self.client.market_order(
+            _ = self.client.market_order(
                 self.symbol,
                 "Sell" if existing == "Buy" else "Buy",
                 Decimal(str(position["size"])),
@@ -511,7 +543,7 @@ class ReferenceAlignedDemoBot(BybitDemoBot):
             )
         if position:
             self.state.pending_strategy_close = False
-            result = self._protect(position, Decimal("0"))
+            result = self._protect(position, Decimal(0))
         elif desired:
             quantity = self._quantity(self.client.last_price(self.symbol))
             # Persist intent before submission to prevent duplicate ambiguous orders.
@@ -519,7 +551,7 @@ class ReferenceAlignedDemoBot(BybitDemoBot):
             self.state.pending_take_profit = "0"
             self.state.last_processed_candle = latest.isoformat()
             self.state.save()
-            self.client.market_order(self.symbol, desired, quantity)
+            _ = self.client.market_order(self.symbol, desired, quantity)
             return f"opened {desired}; awaiting fill for protection"
         else:
             result = None
@@ -536,8 +568,10 @@ def run_demo_command(
     resume: bool = False,
     poll_seconds: int = 10,
 ) -> None:
+    """Run demo command."""
     if poll_seconds < 1:
-        raise ValueError("poll-seconds must be positive")
+        message = "poll-seconds must be positive"
+        raise ValueError(message)
     config, values = PaperBotConfig.load(config_path), load_env(env_path)
     client = BybitDemoClient(
         setting(values, "BYBIT_API_KEY", values.get("API_KEY")),
@@ -547,33 +581,48 @@ def run_demo_command(
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise RuntimeError("Another Bybit demo bot is running") from None
+            message = "Another Bybit demo bot is running"
+            raise RuntimeError(message) from None
         state = DemoState.load_or_create(resume)
+        from bybit_demo_bot.hedge import HedgeReplicaBot
         from bybit_demo_bot.replica import ReferenceReplicaBot
         from shared.hedge_strategy import HEDGE_MODE
-        from bybit_demo_bot.hedge import HedgeReplicaBot
 
         executor = (
             HedgeReplicaBot
             if config.strategy_mode == HEDGE_MODE
             else ReferenceReplicaBot
         )
-        executor(config, client, state).run(min(poll_seconds, 2))
+        with archive_while_running():
+            executor(config, client, state).run(min(poll_seconds, 2))
 
 
-def parse_args() -> argparse.Namespace:
+class CommandArguments(argparse.Namespace):
+    """Arguments validated and populated by the command parser."""
+
+    config: Path = PAPER_BOT_CONFIG_FILE
+    env: Path = ENV_FILE
+    resume: bool = False
+    poll_seconds: int = 10
+
+
+def parse_args() -> CommandArguments:
+    """Parse args."""
     parser = argparse.ArgumentParser(
         description="Trade the strategy on a Bybit demo account"
     )
-    parser.add_argument("run", choices=("run",))
-    parser.add_argument("--config", type=Path, default=PAPER_BOT_CONFIG_FILE)
-    parser.add_argument("--env", type=Path, default=ENV_FILE)
-    parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--poll-seconds", type=int, default=10)
-    return parser.parse_args()
+    _ = parser.add_argument("run", choices=("run",))
+    _ = parser.add_argument(
+        "--config", type=Path, default=PAPER_BOT_CONFIG_FILE
+    )
+    _ = parser.add_argument("--env", type=Path, default=ENV_FILE)
+    _ = parser.add_argument("--resume", action="store_true")
+    _ = parser.add_argument("--poll-seconds", type=int, default=10)
+    return parser.parse_args(namespace=CommandArguments())
 
 
 def main() -> None:
+    """Main."""
     args = parse_args()
     try:
         run_demo_command(
@@ -583,7 +632,8 @@ def main() -> None:
             poll_seconds=args.poll_seconds,
         )
     except (BybitDemoError, OSError, RuntimeError, ValueError) as exc:
-        raise SystemExit(f"Error: {exc}") from exc
+        message = f"Error: {exc}"
+        raise SystemExit(message) from exc
 
 
 if __name__ == "__main__":
