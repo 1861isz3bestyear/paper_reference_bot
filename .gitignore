@@ -234,3 +234,11 @@ live_paper_bot.instance.lock
 live_paper_candles.sqlite*
 
 reference_target.json*
+
+bybitdemoapi.env
+
+# Environment and credential files at any directory depth
+.env
+.env.*
+*.env
+*.env.*
