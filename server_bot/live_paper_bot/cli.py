@@ -225,7 +225,10 @@ class PaperBot:
         ) * interval_ms
         expected_latest_ms = (end_ms // interval_ms) * interval_ms - interval_ms
         cached = self.candle_cache.load(
-            self.market_symbol, self.config.timeframe, start_ms, end_ms
+            self.market_symbol,
+            self.config.timeframe,
+            start_ms=start_ms,
+            end_ms=end_ms,
         )
         has_full_start = (
             not cached.empty
@@ -259,14 +262,17 @@ class PaperBot:
                 downloaded = fetcher(
                     self.market_symbol,
                     self.config.timeframe,
-                    request_start_ms,
-                    end_ms,
+                    start_ms=request_start_ms,
+                    end_ms=end_ms,
                 )
                 self.candle_cache.upsert(
                     self.market_symbol, self.config.timeframe, downloaded
                 )
                 cached = self.candle_cache.load(
-                    self.market_symbol, self.config.timeframe, start_ms, end_ms
+                    self.market_symbol,
+                    self.config.timeframe,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
                 )
                 download_succeeded = True
             except requests.RequestException, ValueError:
@@ -306,14 +312,17 @@ class PaperBot:
             downloaded = fetcher(
                 self.market_symbol,
                 self.config.timeframe,
-                start_ms,
-                end_ms,
+                start_ms=start_ms,
+                end_ms=end_ms,
             )
             self.candle_cache.upsert(
                 self.market_symbol, self.config.timeframe, downloaded
             )
             cached = self.candle_cache.load(
-                self.market_symbol, self.config.timeframe, start_ms, end_ms
+                self.market_symbol,
+                self.config.timeframe,
+                start_ms=start_ms,
+                end_ms=end_ms,
             )
             candle_times_ms = (
                 cached["time"].dt.as_unit("ns").astype("int64") // 1_000_000

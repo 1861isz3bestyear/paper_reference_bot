@@ -87,7 +87,9 @@ def test_persistence_restart_and_completed_only(
         pytest.fail("Expected only two completed candles")
     if data_saver.collect(config, now_ms=120000) != 1:
         pytest.fail("Expected overlap refresh")
-    rows = CandleCache(config.database).load("BTCUSDT", "1m", 0, 180000)
+    rows = CandleCache(config.database).load(
+        "BTCUSDT", "1m", start_ms=0, end_ms=180000
+    )
     if len(rows) != expected_count or starts[-1] != last_start:
         pytest.fail(
             "Restart must resume latest stored candle without duplicates"

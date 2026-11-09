@@ -94,9 +94,13 @@ def test_mexc_kline_error(
     response = Mock(json=Mock(return_value={"msg": "unavailable"}))
     monkeypatch.setattr("requests.get", Mock(return_value=response))
     with pytest.raises(ValueError, match=r"API error"):
-        _ = market.fetch_completed_mexc_klines("BTCUSDT", "1m", 0, 60000)
+        _ = market.fetch_completed_mexc_klines(
+            "BTCUSDT", "1m", start_ms=0, end_ms=60000
+        )
     with pytest.raises(ValueError, match=r"does not support"):
-        _ = market.fetch_completed_mexc_klines("BTCUSDT", "2m", 0, 60000)
+        _ = market.fetch_completed_mexc_klines(
+            "BTCUSDT", "2m", start_ms=0, end_ms=60000
+        )
 
 
 @pytest.mark.parametrize(

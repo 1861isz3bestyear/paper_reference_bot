@@ -308,7 +308,10 @@ class BybitDemoBot:
             # response can be corrected, while avoiding a full-history burst.
             request_start_ms = max(start_ms, cached_latest_ms - interval * 1000)
         downloaded = fetch_completed_linear_klines(
-            self.symbol, self.config.timeframe, request_start_ms, end_ms
+            self.symbol,
+            self.config.timeframe,
+            start_ms=request_start_ms,
+            end_ms=end_ms,
         )
         if self._candles.empty:
             candles = downloaded

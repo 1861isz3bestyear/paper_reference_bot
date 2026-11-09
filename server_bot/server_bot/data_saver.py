@@ -93,7 +93,7 @@ def collect(config: SaverConfig, *, now_ms: int | None = None) -> int:
         else end_ms - config.history_days * 86_400_000
     )
     frame = fetch_completed_linear_klines(
-        config.symbol, config.interval, start_ms, end_ms
+        config.symbol, config.interval, start_ms=start_ms, end_ms=end_ms
     )
     cache.upsert(config.symbol, config.interval, frame)
     return len(frame)

@@ -68,6 +68,24 @@ def config(**changes: object) -> PaperBotConfig:
     return replace(defaults, **changes)
 
 
+def completed_candles(
+    _symbol: str, _interval: str, *, start_ms: int, end_ms: int
+) -> pd.DataFrame:
+    """Return the latest completed candle for the requested range.
+
+    Returns:
+        A single completed observation before the request cutoff.
+
+    """
+    if start_ms > end_ms:
+        pytest.fail("Candle request starts after its cutoff")
+    return pd.DataFrame([{
+        "time": pd.Timestamp(
+            end_ms // 60000 * 60000 - 60000, unit="ms", tz="UTC"
+        )
+    }])
+
+
 def test_client_public_and_private_helpers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -269,7 +287,8 @@ def test_reconcile_opens_then_protects(
         {"time": pd.Timestamp("2026-01-01T00:01:00Z")},
     ])
     monkeypatch.setattr(
-        "bybit_demo_bot.cli.fetch_completed_linear_klines", lambda *_: candle
+        "bybit_demo_bot.cli.fetch_completed_linear_klines",
+        Mock(return_value=candle),
     )
     monkeypatch.setattr(
         "bybit_demo_bot.cli.calculate_strategy_decision",
@@ -333,7 +352,7 @@ def test_existing_position_refreshes_tp_to_latest_close_band(
     }
     candles = pd.DataFrame([{"time": pd.Timestamp("2026-01-01T00:01:00Z")}])
     monkeypatch.setattr(
-        cli, "fetch_completed_linear_klines", lambda *_: candles
+        cli, "fetch_completed_linear_klines", Mock(return_value=candles)
     )
     monkeypatch.setattr(
         cli, "calculate_strategy_decision", lambda *_: Mock(side="Long")
@@ -364,7 +383,7 @@ def test_existing_position_keeps_protection_when_new_band_is_not_profitable(
     }
     candles = pd.DataFrame([{"time": pd.Timestamp("2026-01-01T00:01:00Z")}])
     monkeypatch.setattr(
-        cli, "fetch_completed_linear_klines", lambda *_: candles
+        cli, "fetch_completed_linear_klines", Mock(return_value=candles)
     )
     monkeypatch.setattr(
         cli, "calculate_strategy_decision", lambda *_: Mock(side="Short")
@@ -392,7 +411,7 @@ def test_skips_entry_when_target_is_already_crossed(
     )
     candles = pd.DataFrame([{"time": pd.Timestamp("2026-01-01T00:01:00Z")}])
     monkeypatch.setattr(
-        cli, "fetch_completed_linear_klines", lambda *_: candles
+        cli, "fetch_completed_linear_klines", Mock(return_value=candles)
     )
     monkeypatch.setattr(
         cli, "calculate_strategy_decision", lambda *_: Mock(side="Short")
@@ -432,7 +451,8 @@ def test_reconcile_closes_opposite_position(
         {"time": pd.Timestamp("2026-01-01T00:01:00Z")},
     ])
     monkeypatch.setattr(
-        "bybit_demo_bot.cli.fetch_completed_linear_klines", lambda *_: candle
+        "bybit_demo_bot.cli.fetch_completed_linear_klines",
+        Mock(return_value=candle),
     )
     monkeypatch.setattr(
         "bybit_demo_bot.cli.calculate_strategy_decision",
@@ -474,7 +494,7 @@ def test_reconcile_reverses_position_with_reduce_only_close_first(
     }
     candles = pd.DataFrame([{"time": pd.Timestamp("2026-01-01T00:01:00Z")}])
     monkeypatch.setattr(
-        cli, "fetch_completed_linear_klines", lambda *_: candles
+        cli, "fetch_completed_linear_klines", Mock(return_value=candles)
     )
     monkeypatch.setattr(
         cli, "calculate_strategy_decision", lambda *_: Mock(side="Long")
@@ -704,7 +724,7 @@ def test_stale_history_and_invalid_state(
         DemoState("2026-01-01T00:00:00+00:00"),
     )
     monkeypatch.setattr(
-        cli, "fetch_completed_linear_klines", lambda *_: pd.DataFrame()
+        cli, "fetch_completed_linear_klines", Mock(return_value=pd.DataFrame())
     )
     with pytest.raises(RuntimeError, match="not current"):
         _ = bot.reconcile_once(datetime(2026, 1, 1, 0, 2, 30, tzinfo=UTC))
@@ -871,15 +891,8 @@ def test_exchange_exit_blocks_reentry_across_restart(
     monkeypatch.setattr(
         cli, "calculate_strategy_decision", lambda *_: Mock(side=signal_side[0])
     )
-    monkeypatch.setattr(
-        cli,
-        "fetch_completed_linear_klines",
-        lambda _s, _t, _start, end: pd.DataFrame([{
-            "time": pd.Timestamp(
-                end // 60000 * 60000 - 60000, unit="ms", tz="UTC"
-            )
-        }]),
-    )
+
+    monkeypatch.setattr(cli, "fetch_completed_linear_klines", completed_candles)
     monkeypatch.setattr(BybitDemoBot, "_quantity", lambda *_: Decimal(1))
     monkeypatch.setattr(
         BybitDemoBot,
@@ -950,8 +963,10 @@ def test_legacy_state_conservatively_consumes_current_signal(
     monkeypatch.setattr(
         cli,
         "fetch_completed_linear_klines",
-        lambda *_: pd.DataFrame(
-            [{"time": pd.Timestamp("2026-01-01T00:02:00Z")}]
+        Mock(
+            return_value=pd.DataFrame(
+                [{"time": pd.Timestamp("2026-01-01T00:02:00Z")}]
+            )
         ),
     )
     bot = BybitDemoBot(config(), client, state)
@@ -1048,8 +1063,10 @@ def test_exchange_close_logged_once(
     monkeypatch.setattr(
         cli,
         "fetch_completed_linear_klines",
-        lambda *_: pd.DataFrame(
-            [{"time": pd.Timestamp("2026-01-01T00:02:00Z")}]
+        Mock(
+            return_value=pd.DataFrame(
+                [{"time": pd.Timestamp("2026-01-01T00:02:00Z")}]
+            )
         ),
     )
     monkeypatch.setattr(

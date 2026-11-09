@@ -26,7 +26,7 @@ def bot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     }
     candles = pd.DataFrame([{"time": pd.Timestamp("2026-01-01T00:01:00Z")}])
     monkeypatch.setattr(
-        cli, "fetch_completed_linear_klines", lambda *_: candles
+        cli, "fetch_completed_linear_klines", Mock(return_value=candles)
     )
     monkeypatch.setattr(cli, "reference_decision", lambda *_: Mock(side="Long"))
     return cli.ReferenceAlignedDemoBot(
@@ -157,7 +157,7 @@ def test_exchange_exit_waits_one_candle_and_survives_restart(
     bot.client.market_order.assert_not_called()
     candles = pd.DataFrame([{"time": pd.Timestamp("2026-01-01T00:02:00Z")}])
     monkeypatch.setattr(
-        cli, "fetch_completed_linear_klines", lambda *_: candles
+        cli, "fetch_completed_linear_klines", Mock(return_value=candles)
     )
     if f"opened {side}" not in (
         resumed.reconcile_once(datetime(2026, 1, 1, 0, 3, 5, tzinfo=UTC))
@@ -178,7 +178,7 @@ def test_after_exchange_exit_rechecks_signal_instead_of_forcing_reentry(
     monkeypatch.setattr(cli, "reference_decision", lambda *_: Mock(side=None))
     candles = pd.DataFrame([{"time": pd.Timestamp("2026-01-01T00:02:00Z")}])
     monkeypatch.setattr(
-        cli, "fetch_completed_linear_klines", lambda *_: candles
+        cli, "fetch_completed_linear_klines", Mock(return_value=candles)
     )
     if (bot.reconcile_once(datetime(2026, 1, 1, 0, 3, 5, tzinfo=UTC))) is not (
         None
@@ -228,7 +228,7 @@ def test_fresh_start_waits_until_completed_candle_after_launch(
     bot.client.market_order.assert_not_called()
     candles = pd.DataFrame([{"time": pd.Timestamp("2026-01-01T00:02:00Z")}])
     monkeypatch.setattr(
-        cli, "fetch_completed_linear_klines", lambda *_: candles
+        cli, "fetch_completed_linear_klines", Mock(return_value=candles)
     )
     if "opened Buy" not in (
         bot.reconcile_once(datetime(2026, 1, 1, 0, 3, 5, tzinfo=UTC))

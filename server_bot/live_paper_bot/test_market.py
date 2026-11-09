@@ -39,14 +39,14 @@ def candle_frame(times=("2026-01-01T00:00:00Z",)):
 def test_candle_cache_upserts_filters_and_replaces(tmp_path: Path) -> None:
     """Verify candle cache upserts filters and replaces."""
     cache = CandleCache(tmp_path / "candles.sqlite")
-    if not (cache.load("BTCUSDT", "5m", 0, 10).empty):
+    if not (cache.load("BTCUSDT", "5m", start_ms=0, end_ms=10).empty):
         pytest.fail("Expected cache.load('BTCUSDT', '5m', 0, 10).empty")
     frame = candle_frame(("2026-01-01T00:00:00Z", "2026-01-01T00:05:00Z"))
     cache.upsert("BTCUSDT", "5m", frame)
     changed = frame.iloc[:1].copy()
     changed.loc[changed.index[0], "close"] = 9
     cache.upsert("BTCUSDT", "5m", changed)
-    loaded = cache.load("BTCUSDT", "5m", 0, 2_000_000_000_000)
+    loaded = cache.load("BTCUSDT", "5m", start_ms=0, end_ms=2_000_000_000_000)
     if loaded["close"].tolist() != [9, 1.5]:
         pytest.fail("Expected loaded['close'].tolist() == [9, 1.5]")
     cache.upsert("BTCUSDT", "5m", pd.DataFrame())
@@ -106,7 +106,9 @@ def test_rest_klines_paginate_deduplicate_and_drop_open_candle(
         responses.append(response)
     get = Mock(side_effect=responses)
     monkeypatch.setattr("live_paper_bot.market.requests.get", get)
-    result = fetch_completed_linear_klines("BTCUSDT", "5m", 0, 700_000)
+    result = fetch_completed_linear_klines(
+        "BTCUSDT", "5m", start_ms=0, end_ms=700_000
+    )
     if result["time"].tolist() != [pd.Timestamp("1970-01-01T00:05:00Z")]:
         pytest.fail(
             "Expected result['time'].tolist() =="
@@ -121,20 +123,24 @@ def test_rest_klines_validation_and_empty(
 ) -> None:
     """Verify rest klines validation and empty."""
     with pytest.raises(ValueError, match="does not support"):
-        _ = fetch_completed_linear_klines("BTCUSDT", "2m", 0, 1)
+        _ = fetch_completed_linear_klines("BTCUSDT", "2m", start_ms=0, end_ms=1)
     response = Mock()
     response.json.return_value = {"retCode": 0, "result": {"list": []}}
     monkeypatch.setattr(
         "live_paper_bot.market.requests.get", Mock(return_value=response)
     )
-    if not (fetch_completed_linear_klines("BTCUSDT", "5m", 0, 1).empty):
+    if not (
+        fetch_completed_linear_klines(
+            "BTCUSDT", "5m", start_ms=0, end_ms=1
+        ).empty
+    ):
         pytest.fail(
             "Expected fetch_completed_linear_klines('BTCUSDT', '5m', 0,"
             " 1).empty"
         )
     response.json.return_value = {"retCode": 2, "retMsg": "limited"}
     with pytest.raises(ValueError, match="limited"):
-        _ = fetch_completed_linear_klines("BTCUSDT", "5m", 0, 1)
+        _ = fetch_completed_linear_klines("BTCUSDT", "5m", start_ms=0, end_ms=1)
 
 
 def test_mexc_rest_price_candles_and_reverse(
@@ -155,7 +161,9 @@ def test_mexc_rest_price_candles_and_reverse(
     empty.json.return_value = []
     get = Mock(side_effect=[page, empty])
     monkeypatch.setattr("live_paper_bot.market.requests.get", get)
-    candles = fetch_completed_mexc_klines("SHIBUSDT", "1m", 0, 120_000)
+    candles = fetch_completed_mexc_klines(
+        "SHIBUSDT", "1m", start_ms=0, end_ms=120_000
+    )
     reversed_candles = reverse_candles(candles)
 
     if candles["close"].tolist() != [2.5]:
@@ -188,14 +196,14 @@ def test_mexc_rest_price_candles_and_reverse(
 def test_mexc_validation_and_rest_feed(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify mexc validation and rest feed."""
     with pytest.raises(ValueError, match="does not support"):
-        _ = fetch_completed_mexc_klines("SHIBUSDT", "2m", 0, 1)
+        _ = fetch_completed_mexc_klines("SHIBUSDT", "2m", start_ms=0, end_ms=1)
     response = Mock()
     response.json.return_value = {"msg": "bad symbol"}
     monkeypatch.setattr(
         "live_paper_bot.market.requests.get", Mock(return_value=response)
     )
     with pytest.raises(ValueError, match="bad symbol"):
-        _ = fetch_completed_mexc_klines("BAD", "1m", 0, 1)
+        _ = fetch_completed_mexc_klines("BAD", "1m", start_ms=0, end_ms=1)
     feed = RestMarketFeed()
     feed.start()
     if feed.health().connected:

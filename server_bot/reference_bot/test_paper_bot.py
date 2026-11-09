@@ -557,11 +557,11 @@ class TestPaperBot:
                     datetime(2026, 1, 1, 0, 11, tzinfo=UTC),
                 )
 
-        if fetch.call_args.args[2] != int(
+        if fetch.call_args.kwargs["start_ms"] != int(
             pd.Timestamp("2025-12-18T00:00:00Z").timestamp() * 1000
         ):
             pytest.fail(
-                "Expected fetch.call_args.args[2] =="
+                "Expected fetch.call_args.kwargs['start_ms'] =="
                 " int(pd.Timestamp('2025-12-18T00:00:00Z').timestamp() * 1000)"
             )
         if len(loaded) != len(history):
