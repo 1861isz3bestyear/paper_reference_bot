@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 ENTITY_SERVICES = {
+    "data-saver": "paper-data-saver.service",
     "reference": "paper-bot-reference.service",
     "paper": "paper-bot-live.service",
     "demo": "bybit-demo.service",
@@ -22,6 +23,7 @@ ENTITY_SERVICES = {
     "smtp": "smtp-monitor.timer",
 }
 ENTITY_MARKERS = {
+    "data-saver": "server_bot.data_saver",
     "reference": "reference_bot.cli",
     "paper": "live_paper_bot.cli",
     "demo": "run-bybit-demo",
@@ -96,7 +98,9 @@ def unit_names(entities: Sequence[str] | None = None) -> tuple[str, ...]:
 
 def validate_layout(layout: Layout, entities: Sequence[str] | None = None) -> None:
     selected = selected_entities(entities)
-    required = [layout.project / "pyproject.toml", layout.config]
+    required = [layout.project / "pyproject.toml"]
+    if set(selected) - {"data-saver"}:
+        required.append(layout.config)
     credential_paths = []
     if {"reference", "paper"} & set(selected):
         credential_paths.append(layout.paper_env)
@@ -132,6 +136,10 @@ def unit_contents(layout: Layout) -> dict[str, str]:
         "[Install]\nWantedBy=default.target\n"
     )
     commands = {
+        "paper-data-saver.service": (
+            "Public candle data saver",
+            f"{_quote(layout.uv)} run python -m server_bot.data_saver",
+        ),
         "paper-bot-reference.service": (
             "Reference paper bot",
             f"{_quote(layout.uv)} run python -m reference_bot.cli run --resume --config {_quote(layout.config)}",
@@ -263,6 +271,9 @@ def collect_logs(layout: Layout, output_dir: Path, runner: Runner = run, *, sinc
         "bot-stats.txt": [str(layout.uv), "run", "--project", str(layout.project), "python", "-m",
                           "server_bot.cli", "stats", "--config", str(layout.config)],
     }
+    if selected_entities(entities) == ("data-saver",):
+        commands.pop("bot-status.txt")
+        commands.pop("bot-stats.txt")
     for filename, command in commands.items():
         (report / filename).write_text(_capture(runner, command), encoding="utf-8")
     archive = output_dir / f"{report.name}.tar.gz"

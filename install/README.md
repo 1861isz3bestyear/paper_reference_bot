@@ -175,3 +175,35 @@ Debian does not need a special `.env`. The existing application files are used d
 
 Create them from their `.example` files and restrict permissions with `chmod 600`. Do not use
 Testnet credentials for the Demo Trading service.
+
+### Install only the public candle data saver
+
+No trading configuration, exchange credentials, account state, or SMTP setup is
+required. From the application directory (`server_bot/`):
+
+```bash
+uv sync --locked
+uv run python ../install/bot_services.py install --entity data-saver
+uv run python ../install/bot_services.py check --entity data-saver
+```
+
+This installs only `paper-data-saver.service`. It runs
+`python -m server_bot.data_saver` with BTCUSDT **1m** candles, a 30-second poll,
+and a seven-day initial backfill. The SQLite archive is `data/candles.sqlite`
+relative to the application directory. Completed candles are upserted by symbol,
+interval and timestamp; a restart resumes from the latest stored candle,
+including gaps during downtime. Continuous mode logs failed requests and retries.
+
+For a manual collection or custom settings:
+
+```bash
+uv run python -m server_bot.data_saver --once
+uv run python -m server_bot.data_saver --symbol ETHUSDT --interval 5m --database data/eth.sqlite --history-days 30
+```
+
+For service customization use `systemctl --user edit paper-data-saver.service`
+and replace `ExecStart` with the same installed command plus desired arguments.
+Use `stop`, `restart`, `uninstall` or `collect-logs` with `--entity data-saver`
+to manage this service independently. The saver uses only public Bybit linear
+market data and never submits orders. It cannot recover candles no longer
+available from the exchange.

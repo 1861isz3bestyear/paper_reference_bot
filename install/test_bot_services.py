@@ -199,3 +199,25 @@ def test_main_other_branches_and_error(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(services, "resolve_layout", lambda *_: (_ for _ in ()).throw(RuntimeError("bad")))
     assert services.main(["status"]) == 1
     assert "Error: bad" in capsys.readouterr().err
+
+
+def test_data_saver_only_needs_no_config_or_credentials(layout):
+    layout.config.unlink()
+    layout.paper_env.unlink()
+    layout.demo_env.unlink()
+    layout.bybit_env.unlink()
+    runner = FakeRunner()
+    services.install(layout, runner, entities=["data-saver"])
+    assert [p.name for p in layout.unit_dir.iterdir()] == ["paper-data-saver.service"]
+    text = (layout.unit_dir / "paper-data-saver.service").read_text()
+    assert "python -m server_bot.data_saver" in text
+    assert "--config" not in text and "--env" not in text
+    assert runner.calls[-1][0] == ["systemctl", "--user", "start", "paper-data-saver.service"]
+
+
+def test_data_saver_logs_do_not_require_trading_state(layout, tmp_path):
+    runner = FakeRunner()
+    archive = services.collect_logs(layout, tmp_path, runner, entities=["data-saver"])
+    assert archive.is_file()
+    assert len(runner.calls) == 2
+    assert all("server_bot.cli" not in call[0] for call in runner.calls)

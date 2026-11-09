@@ -51,6 +51,7 @@ jobs:
       - name: Check installed CLI entry points
         working-directory: server_bot
         run: |
+          uv run --locked python -m server_bot.data_saver --help
           uv run --locked python -m server_bot.cli --help
           uv run --locked python -m reference_bot.cli --help
           uv run --locked python -m live_paper_bot.cli --help
@@ -58,6 +59,9 @@ jobs:
       - name: Test application with existing coverage gate
         working-directory: server_bot
         run: uv run --locked pytest --junitxml=../test-results/application.xml
+      - name: Verify standalone saver coverage
+        working-directory: server_bot
+        run: uv run --locked pytest server_bot/test_data_saver.py --cov-reset --cov=server_bot.data_saver --cov-branch --cov-fail-under=92
       - name: Test installer and service selection
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         working-directory: install
