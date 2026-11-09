@@ -388,3 +388,49 @@ option IV and open interest, and index price from the raw option responses.
 A missing source remains an explicit error, not a carried-forward value.
 Exchange outages or collection passes taking over a minute can leave gaps;
 historical option chains and order books cannot be backfilled by this collector.
+
+### Compact archive storage
+
+Use the optional compact mode for ten-minute snapshots:
+
+```bash
+uv run python -m server_bot.tunnel_archive --asset BTC \
+  --storage-mode compact --poll-seconds 600 \
+  --output tunnel_inputs_compact.sqlite
+```
+
+The default remains `--storage-mode raw` with a 60-second interval. Compact
+mode stores UTF-8 response text compressed with zlib in `tunnel_payloads`,
+keyed by its SHA-256 digest. Identical response bodies share one payload,
+including unchanged instrument definitions. `tunnel_observations` retains
+one row per source per pass, with asset, source, request/availability timestamps,
+error, collection ID, minute label and payload digest. Each source commits its
+payload and observation atomically. Failed response bodies are retained too.
+
+Join observations to payloads on `digest`, then decode with
+`zlib.decompress(payload).decode("utf-8")` to recover the original response text.
+Existing raw-archive readers do not read these new tables. Use a separate output
+file for clarity; selecting a mode does not migrate or delete existing data.
+The schema can coexist with raw tables in the same database.
+
+Compression is lossless and deduplication compares exact response text, so
+exchange timestamps or reordered JSON can prevent sharing. Full candle/OI
+windows are still collected; this mode does not implement incremental history
+or retention. Ten-minute polling reduces snapshot count by 90% but misses
+changes between snapshots. Measure actual disk growth after successful
+Deribit collection before sizing retention; no compression ratio is guaranteed.
+
+For the installed GEX service, run
+`systemctl --user edit paper-gex-archive.service` and set:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/home/USER/.local/bin/uv run python -m server_bot.tunnel_archive --asset BTC --storage-mode compact --poll-seconds 600 --output tunnel_inputs_compact.sqlite
+```
+
+Replace the uv path with the absolute executable path from the installed unit
+(`systemctl --user cat paper-gex-archive.service`). Keep its working directory.
+Then run `systemctl --user daemon-reload` and
+`systemctl --user restart paper-gex-archive.service`. This changes only the
+standalone GEX collector; bot-owned automatic collection still uses raw mode.
