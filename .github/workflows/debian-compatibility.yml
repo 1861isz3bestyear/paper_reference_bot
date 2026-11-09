@@ -59,6 +59,10 @@ jobs:
       - name: Test application with existing coverage gate
         working-directory: server_bot
         run: uv run --locked pytest --junitxml=../test-results/application.xml
+      - name: Test standalone saver end to end
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        working-directory: server_bot
+        run: uv run --locked pytest tests/test_data_saver_e2e.py -m e2e --no-cov --junitxml=../test-results/data-saver-e2e.xml
       - name: Verify standalone saver coverage
         working-directory: server_bot
         run: uv run --locked pytest server_bot/test_data_saver.py --cov-reset --cov=server_bot.data_saver --cov-branch --cov-fail-under=92

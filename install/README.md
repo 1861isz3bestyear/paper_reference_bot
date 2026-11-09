@@ -207,3 +207,27 @@ Use `stop`, `restart`, `uninstall` or `collect-logs` with `--entity data-saver`
 to manage this service independently. The saver uses only public Bybit linear
 market data and never submits orders. It cannot recover candles no longer
 available from the exchange.
+
+### End-to-end CI checks
+
+Both Debian 11 and Debian 12 jobs run
+`tests/test_data_saver_e2e.py` and upload `data-saver-e2e.xml` with the other
+JUnit reports. To run these checks from the application directory:
+
+```bash
+uv run --locked pytest tests/test_data_saver_e2e.py -m e2e --no-cov
+```
+
+The tests start separate Python processes and a local HTTP exchange fixture,
+then inspect real SQLite files. Only the exchange URL is redirected; production
+CLI parsing, HTTP requests, pagination and storage execute normally. Scenarios
+cover the default 1m backfill, completed candles, restart and overlap updates,
+HTTP/API failure recovery, custom series, empty responses and invalid settings.
+The installer test invokes the actual CLI with no trading config or credentials,
+checks the generated unit, and verifies install/uninstall command arguments.
+Systemd commands are recorded by fixture executables because CI containers have
+no user systemd manager. Actual service activation remains covered by the
+opt-in `test_installed_services.py` checks on a configured Linux host.
+
+This E2E run supplements the existing full-application and standalone-saver
+coverage gates; it does not replace either gate or depend on live exchange data.
