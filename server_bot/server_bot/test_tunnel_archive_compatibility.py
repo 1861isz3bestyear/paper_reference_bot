@@ -64,6 +64,19 @@ def test_archive_matches_calculator_inputs(
             },
         },
     }
+    growth = {
+        "code": "00000",
+        "data": [{"ts": str(int(now.timestamp() * 1000)), "growthRate": "0.2"}],
+    }
+    payloads.update({
+        "bitget_growth_24h": growth,
+        "bitget_growth_30d": growth,
+        "bitget_loan_rate": {
+            "code": "00000",
+            "requestTime": int(now.timestamp() * 1000),
+            "data": {"dailyInterest": "0.001", "annualInterest": "0.365"},
+        },
+    })
     session = requests.Session()
     responses = iter(sources(asset))
 
@@ -78,7 +91,11 @@ def test_archive_matches_calculator_inputs(
         response = requests.Response()
         response.status_code = 200
         response.raw = BytesIO(
-            json.dumps(payloads.get(source.name, {"result": {}})).encode()
+            json.dumps(
+                payloads.get(
+                    source.name, {"result": {}, "code": "00000", "data": []}
+                )
+            ).encode()
         )
         return response
 
@@ -91,11 +108,14 @@ def test_archive_matches_calculator_inputs(
 import sqlite3
 from contextlib import closing
 from io import BytesIO
+from pathlib import Path
 import sys
 from datetime import datetime
 sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, str(Path(sys.argv[1]).parent / "margin_loan_oscillator"))
 from gui_calculator.options_data import normalize_chain
 from gui_calculator.options_depth import parse_depth
+from oscillator.bitget import parse_growth, parse_rate
 from shared.validation import json_object
 with closing(sqlite3.connect(sys.argv[2])) as db:
     rows = {r[0]: r[1:] for r in db.execute(
@@ -105,6 +125,9 @@ with closing(sqlite3.connect(sys.argv[2])) as db:
 chain = normalize_chain(json_object(rows['instruments'][0])['result'],
                         json_object(rows['options'][0])['result'],
                         asset=sys.argv[3])
+assert parse_growth(rows['bitget_growth_24h'][0])[0].growth == 0.2
+assert parse_growth(rows['bitget_growth_30d'][0])[0].growth == 0.2
+assert parse_rate(rows['bitget_loan_rate'][0]).daily == 0.001
 assert len(chain) == 1
 assert chain[0].iv == 0.5
 assert chain[0].open_interest == 20
@@ -120,7 +143,7 @@ assert json_object(rows['spot'][0])['result']['index_price'] == 100000
     asyncio.run(check_calculator(script, calculator, path, asset=asset))
     with closing(sqlite3.connect(path)) as db:
         assert db.execute("SELECT COUNT(*) FROM tunnel_inputs").fetchone() == (
-            9,
+            12,
         )
 
 

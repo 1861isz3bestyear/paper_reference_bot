@@ -25,6 +25,7 @@ import requests
 from shared.validation import json_object
 
 BYBIT = "https://api.bybit.com/v5/"
+BITGET = "https://api.bitget.com/api/v3/market/"
 DERIBIT = "https://www.deribit.com/api/v2/public/"
 
 
@@ -92,7 +93,50 @@ def sources(asset: str) -> tuple[Source, ...]:
             url=BYBIT + "market/open-interest",
             params={**market, "intervalTime": "1h", "limit": "200"},
         ),
+        *bitget_sources(asset),
     )
+
+
+def bitget_sources(asset: str) -> tuple[Source, ...]:
+    """Describe the same public lending feeds used by the local calculator.
+
+    Returns:
+        Hourly/daily growth windows and the current VIP0 quote.
+
+    """
+    return (
+        *(
+            Source(
+                name=f"bitget_growth_{period}",
+                url=BITGET + "margin-loan-growth",
+                params={
+                    "symbol": f"{asset}USDT",
+                    "coin": asset,
+                    "period": period,
+                },
+            )
+            for period in ("24h", "30d")
+        ),
+        Source(
+            name="bitget_loan_rate",
+            url=BITGET + "margin-loans",
+            params={"coin": asset, "level": "vip0"},
+        ),
+    )
+
+
+def _public_request(
+    session: requests.Session, source: Source
+) -> requests.Response:
+    """Space Bitget requests to respect its public endpoint rate limit.
+
+    Returns:
+        The original exchange response.
+
+    """
+    if source.url.startswith(BITGET):
+        time.sleep(1)
+    return session.get(source.url, params=source.params, timeout=30)
 
 
 def _margin_request(session: requests.Session) -> requests.Response:
@@ -127,9 +171,14 @@ def _margin_request(session: requests.Session) -> requests.Response:
     )
 
 
-def _validate_response(response: requests.Response) -> None:
+def _validate_response(response: requests.Response, *, source: Source) -> None:
     response.raise_for_status()
     body = json_object(response.text)
+    if source.url.startswith(BITGET):
+        if body.get("code") != "00000" or body.get("data") is None:
+            msg = "Bitget returned an error or missing data."
+            raise ValueError(msg)
+        return
     if body.get("retCode", 0) != 0 or "error" in body or "result" not in body:
         msg = "Exchange returned an error or missing result."
         raise ValueError(msg)
@@ -255,13 +304,11 @@ def collect(
                 response = (
                     _margin_request(session)
                     if source.name == "margin"
-                    else session.get(
-                        source.url, params=source.params, timeout=30
-                    )
+                    else _public_request(session, source)
                 )
                 available = datetime.now(UTC).isoformat()
                 payload = response.text
-                _validate_response(response)
+                _validate_response(response, source=source)
             except (requests.RequestException, ValueError, TypeError) as exc:
                 available = datetime.now(UTC).isoformat()
                 # Exception URLs/headers may contain credentials. Keep only

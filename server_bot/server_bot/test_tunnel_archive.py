@@ -7,6 +7,7 @@ import sqlite3
 import zlib
 from contextlib import closing
 from io import BytesIO
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal
 
 import pytest
@@ -43,8 +44,8 @@ def test_collection_survives_restart_and_missing_margin(
     monkeypatch.setattr(session, "get", get)
     response = requests.Response()
     response.status_code = 200
-    response.raw = BytesIO(b'{"result": {"raw": [1, 2]}, "retCode": 0}')
-    responses.extend([response] * 16)
+    response.raw = BytesIO(b'{"result":{"raw":[1,2]},"code":"00000","data":[]}')
+    responses.extend([response] * 22)
     path = tmp_path / "nested" / "archive.sqlite"
     assert collect(path, session) == 1
     assert collect(path, session) == 1
@@ -53,12 +54,12 @@ def test_collection_survives_restart_and_missing_margin(
             "SELECT source, requested_at, available_at, payload, error "
             "FROM tunnel_inputs ORDER BY id"
         ).fetchall()
-    expected_rows = 18
+    expected_rows = 24
     assert len(rows) == expected_rows
     assert rows[0][3] == response.text
     assert rows[0][1] <= rows[0][2]
-    assert rows[8][0] == "margin"
-    assert rows[8][4] == "ValueError"
+    assert rows[11][0] == "margin"
+    assert rows[11][4] == "ValueError"
 
 
 @pytest.mark.parametrize("storage_mode", ["raw", "compact"])
@@ -87,8 +88,8 @@ def test_exchange_failure_keeps_body_and_continues(
     bad.raw = BytesIO(b'{"retCode": 10001, "result": {}}')
     good = requests.Response()
     good.status_code = 200
-    good.raw = BytesIO(b'{"result": []}')
-    responses.extend([bad, good, good, good, good, good, good, good])
+    good.raw = BytesIO(b'{"result":[],"code":"00000","data":[]}')
+    responses.extend([bad, *([good] * 10)])
     path = tmp_path / "archive.sqlite"
     assert collect(path, session, storage_mode=storage_mode) == (
         ARCHIVE_SNAPSHOT_COUNT
@@ -140,7 +141,9 @@ def test_minute_collection_preserves_all_sources_and_legacy_rows(
         requested.append((url, kwargs.get("params")))
         response = requests.Response()
         response.status_code = 200
-        response.raw = BytesIO(b'{"retCode":0,"result":{"preserved":[1,2,3]}}')
+        response.raw = BytesIO(
+            b'{"code":"00000","data":[],"result":{"preserved":[1,2,3]}}'
+        )
         return response
 
     monkeypatch.setattr(session, "get", get)
@@ -160,7 +163,7 @@ def test_minute_collection_preserves_all_sources_and_legacy_rows(
     assert legacy == [(None, None)]
     expected_passes = 2
     assert len(groups) == expected_passes
-    assert not (any(row[2:] != (9, 9) for row in groups))
+    assert not (any(row[2:] != (12, 12) for row in groups))
     assert not any(not str(row[1]).endswith(":00+00:00") for row in groups)
     assert {row[0] for row in sources_saved} == {
         "instruments",
@@ -172,6 +175,9 @@ def test_minute_collection_preserves_all_sources_and_legacy_rows(
         "hourly_candles",
         "oi",
         "margin",
+        "bitget_growth_24h",
+        "bitget_growth_30d",
+        "bitget_loan_rate",
     }
     assert not any(
         row[2] or '"preserved":[1,2,3]' not in row[1] for row in sources_saved
@@ -197,7 +203,10 @@ def test_compact_snapshots_preserve_payloads_and_deduplicate(
     """Keep exact payloads, failures and timing across restarts and modes."""
     monkeypatch.delenv("BYBIT_API_KEY", raising=False)
     monkeypatch.delenv("BYBIT_API_SECRET", raising=False)
-    payload = '{"result":{"instrument":"BTC-€","data":[1,2,3]}}'
+    payload = (
+        '{"code":"00000","data":[],'
+        '"result":{"instrument":"BTC-€","data":[1,2,3]}}'
+    )
     session = requests.Session()
 
     def get(*_args: object, **_kwargs: object) -> requests.Response:
@@ -236,7 +245,113 @@ def test_compact_snapshots_preserve_payloads_and_deduplicate(
         payload,
         "",
     }
-    assert groups == [(9,), (9,)]
-    assert raw_count == [(9,)]
+    assert groups == [(12,), (12,)]
+    assert raw_count == [(12,)]
     assert all(row[1] <= row[2] for row in rows)
-    assert rows[8][0::3] == ("margin", "ValueError")
+    assert rows[11][0::3] == ("margin", "ValueError")
+
+
+@pytest.mark.parametrize("asset", ["BTC", "ETH"])
+def test_bitget_requests_match_local_feeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, asset: str
+) -> None:
+    """Save both history windows and the current quote without credentials."""
+    monkeypatch.delenv("BYBIT_API_KEY", raising=False)
+    monkeypatch.delenv("BYBIT_API_SECRET", raising=False)
+    requests_seen: list[tuple[str, object]] = []
+    pauses: list[float] = []
+    session = requests.Session()
+
+    def get(url: str, **kwargs: object) -> requests.Response:
+        """Return a valid envelope and record public query parameters.
+
+        Returns:
+            A successful exchange response.
+
+        """
+        requests_seen.append((url, kwargs.get("params")))
+        response = requests.Response()
+        response.status_code = 200
+        response.raw = BytesIO(b'{"result":[],"code":"00000","data":[]}')
+        return response
+
+    monkeypatch.setattr(session, "get", get)
+    monkeypatch.setattr(
+        "server_bot.tunnel_archive.time", SimpleNamespace(sleep=pauses.append)
+    )
+    assert collect(tmp_path / "archive.sqlite", session, asset=asset) == 1
+    prefix = "https://api.bitget.com/api/v3/market/"
+    assert requests_seen[-3:] == [
+        (
+            prefix + "margin-loan-growth",
+            {"symbol": f"{asset}USDT", "coin": asset, "period": "24h"},
+        ),
+        (
+            prefix + "margin-loan-growth",
+            {"symbol": f"{asset}USDT", "coin": asset, "period": "30d"},
+        ),
+        (prefix + "margin-loans", {"coin": asset, "level": "vip0"}),
+    ]
+    assert pauses == [1, 1, 1]
+
+
+@pytest.mark.parametrize("storage_mode", ["raw", "compact"])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"code":"40000","msg":"rate limited","data":[]}',
+        b'{"code":"00000"}',
+        b'{"code":"00000","data":null}',
+        b'{"result":[]}',
+    ],
+)
+def test_bitget_failures_retain_evidence_and_other_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    storage_mode: Literal["raw", "compact"],
+    payload: bytes,
+) -> None:
+    """Reject Bitget API failures even when HTTP succeeds, in either mode."""
+    monkeypatch.delenv("BYBIT_API_KEY", raising=False)
+    pauses: list[float] = []
+    monkeypatch.setattr(
+        "server_bot.tunnel_archive.time", SimpleNamespace(sleep=pauses.append)
+    )
+    session = requests.Session()
+
+    def get(url: str, **_kwargs: object) -> requests.Response:
+        """Fail Bitget feeds but let other public sources succeed.
+
+        Returns:
+            A source-specific exchange response.
+
+        """
+        response = requests.Response()
+        response.status_code = 200
+        response.raw = BytesIO(payload if "bitget" in url else b'{"result":[]}')
+        return response
+
+    monkeypatch.setattr(session, "get", get)
+    path = tmp_path / "archive.sqlite"
+    expected_failures = 4
+    assert (
+        collect(path, session, storage_mode=storage_mode) == expected_failures
+    )
+    with closing(sqlite3.connect(path)) as db:
+        if storage_mode == "raw":
+            rows: list[tuple[str, str]] = db.execute(
+                "SELECT payload,error FROM tunnel_inputs "
+                "WHERE source LIKE 'bitget_%'"
+            ).fetchall()
+        else:
+            compressed: list[tuple[bytes, str]] = db.execute(
+                "SELECT p.payload,o.error FROM tunnel_observations o "
+                "JOIN tunnel_payloads p ON p.digest=o.digest "
+                "WHERE o.source LIKE 'bitget_%'"
+            ).fetchall()
+            rows = [
+                (zlib.decompress(body).decode(), error)
+                for body, error in compressed
+            ]
+    assert rows == [(payload.decode(), "ValueError")] * 3
