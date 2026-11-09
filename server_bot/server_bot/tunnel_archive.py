@@ -11,10 +11,12 @@ import os
 import sqlite3
 import sys
 import time
+import zlib
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote, urlencode
 from uuid import uuid4
 
@@ -156,8 +158,72 @@ def _prepare_archive(db: sqlite3.Connection) -> None:
         )
 
 
+def _prepare_compact_archive(db: sqlite3.Connection) -> None:
+    """Create compressed payload storage and timed observations."""
+    with db:
+        _ = db.execute("""CREATE TABLE IF NOT EXISTS tunnel_payloads (
+            digest TEXT PRIMARY KEY, codec TEXT NOT NULL,
+            payload BLOB NOT NULL)""")
+        _ = db.execute("""CREATE TABLE IF NOT EXISTS tunnel_observations (
+            id INTEGER PRIMARY KEY, asset TEXT NOT NULL,
+            source TEXT NOT NULL, requested_at TEXT NOT NULL,
+            available_at TEXT NOT NULL, digest TEXT NOT NULL
+                REFERENCES tunnel_payloads(digest),
+            error TEXT NOT NULL, collection_id TEXT NOT NULL,
+            minute_at TEXT NOT NULL)""")
+        _ = db.execute(
+            "CREATE INDEX IF NOT EXISTS tunnel_observations_minute "
+            "ON tunnel_observations(asset, minute_at, collection_id)"
+        )
+
+
+def _store_observation(
+    db: sqlite3.Connection,
+    values: tuple[str, ...],
+    *,
+    storage_mode: Literal["raw", "compact"],
+) -> None:
+    """Store exact response bytes once while retaining every observation."""
+    asset, source, requested, available, payload, error, collection, minute = (
+        values
+    )
+    if storage_mode == "raw":
+        _ = db.execute(
+            "INSERT INTO tunnel_inputs "
+            "(asset, source, requested_at, available_at, payload, error, "
+            "collection_id, minute_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            values,
+        )
+        return
+    encoded = payload.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    _ = db.execute(
+        "INSERT OR IGNORE INTO tunnel_payloads VALUES (?, 'zlib', ?)",
+        (digest, zlib.compress(encoded)),
+    )
+    _ = db.execute(
+        "INSERT INTO tunnel_observations "
+        "(asset, source, requested_at, available_at, digest, error, "
+        "collection_id, minute_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            asset,
+            source,
+            requested,
+            available,
+            digest,
+            error,
+            collection,
+            minute,
+        ),
+    )
+
+
 def collect(
-    path: Path, session: requests.Session, *, asset: str = "BTC"
+    path: Path,
+    session: requests.Session,
+    *,
+    asset: str = "BTC",
+    storage_mode: Literal["raw", "compact"] = "raw",
 ) -> int:
     """Commit each response independently, retaining failed-source diagnostics.
 
@@ -176,7 +242,10 @@ def collect(
     path.parent.mkdir(parents=True, exist_ok=True)
     failures = 0
     with closing(sqlite3.connect(path, timeout=30)) as db:
-        _prepare_archive(db)
+        if storage_mode == "raw":
+            _prepare_archive(db)
+        else:
+            _prepare_compact_archive(db)
         collection_id = uuid4().hex
         minute = datetime.now(UTC).replace(second=0, microsecond=0).isoformat()
         for source in requests_to_make:
@@ -200,11 +269,8 @@ def collect(
                 error = type(exc).__name__
                 failures += 1
             with db:
-                _ = db.execute(
-                    """INSERT INTO tunnel_inputs
-                    (asset, source, requested_at, available_at, payload, error,
-                     collection_id, minute_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                _store_observation(
+                    db,
                     (
                         asset,
                         source.name,
@@ -215,6 +281,7 @@ def collect(
                         collection_id,
                         minute,
                     ),
+                    storage_mode=storage_mode,
                 )
     return failures
 
@@ -226,6 +293,7 @@ class Arguments(argparse.Namespace):
     asset: str = "BTC"
     poll_seconds: int = 60
     once: bool = False
+    storage_mode: Literal["raw", "compact"] = "raw"
 
 
 def main() -> None:
@@ -242,13 +310,21 @@ def main() -> None:
     _ = parser.add_argument("--asset", choices=("BTC", "ETH"), default="BTC")
     _ = parser.add_argument("--poll-seconds", type=int, default=60)
     _ = parser.add_argument("--once", action="store_true")
+    _ = parser.add_argument(
+        "--storage-mode", choices=("raw", "compact"), default="raw"
+    )
     args = Arguments()
     _ = parser.parse_args(namespace=args)
     if args.poll_seconds < 1:
         parser.error("--poll-seconds must be positive")
     with requests.Session() as session:
         while True:
-            failures = collect(args.output, session, asset=args.asset)
+            failures = collect(
+                args.output,
+                session,
+                asset=args.asset,
+                storage_mode=args.storage_mode,
+            )
             _ = sys.stdout.write(
                 str(json.dumps({"failed_sources": failures})) + "\n"
             )

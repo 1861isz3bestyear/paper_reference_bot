@@ -4,18 +4,18 @@
 from __future__ import annotations
 
 import sqlite3
+import zlib
 from contextlib import closing
 from io import BytesIO
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
+import pytest
 import requests
 
 from server_bot.tunnel_archive import collect
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 ARCHIVE_SNAPSHOT_COUNT = 2
@@ -61,9 +61,11 @@ def test_collection_survives_restart_and_missing_margin(
     assert rows[8][4] == "ValueError"
 
 
+@pytest.mark.parametrize("storage_mode", ["raw", "compact"])
 def test_exchange_failure_keeps_body_and_continues(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    storage_mode: Literal["raw", "compact"],
 ) -> None:
     """Verify exchange failure keeps body and continues."""
     monkeypatch.delenv("BYBIT_API_KEY", raising=False)
@@ -88,9 +90,23 @@ def test_exchange_failure_keeps_body_and_continues(
     good.raw = BytesIO(b'{"result": []}')
     responses.extend([bad, good, good, good, good, good, good, good])
     path = tmp_path / "archive.sqlite"
-    assert collect(path, session) == ARCHIVE_SNAPSHOT_COUNT
+    assert collect(path, session, storage_mode=storage_mode) == (
+        ARCHIVE_SNAPSHOT_COUNT
+    )
     with closing(sqlite3.connect(path)) as db:
-        rows = db.execute("SELECT payload, error FROM tunnel_inputs").fetchall()
+        if storage_mode == "raw":
+            rows: list[tuple[str, str]] = db.execute(
+                "SELECT payload, error FROM tunnel_inputs"
+            ).fetchall()
+        else:
+            compressed: list[tuple[bytes, str]] = db.execute(
+                "SELECT p.payload, o.error FROM tunnel_observations o "
+                "JOIN tunnel_payloads p ON p.digest = o.digest ORDER BY o.id"
+            ).fetchall()
+            rows = [
+                (zlib.decompress(body).decode("utf-8"), error)
+                for body, error in compressed
+            ]
     assert rows[0] == (bad.text, "ValueError")
     assert rows[1] == (good.text, "")
 
@@ -173,3 +189,54 @@ def test_minute_collection_preserves_all_sources_and_legacy_rows(
         "https://api.bybit.com/v5/market/tickers",
         {"category": "linear", "symbol": "BTCUSDT"},
     ) in requested
+
+
+def test_compact_snapshots_preserve_payloads_and_deduplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep exact payloads, failures and timing across restarts and modes."""
+    monkeypatch.delenv("BYBIT_API_KEY", raising=False)
+    monkeypatch.delenv("BYBIT_API_SECRET", raising=False)
+    payload = '{"result":{"instrument":"BTC-€","data":[1,2,3]}}'
+    session = requests.Session()
+
+    def get(*_args: object, **_kwargs: object) -> requests.Response:
+        """Return a repeatable successful response.
+
+        Returns:
+            A UTF-8 exchange response.
+
+        """
+        response = requests.Response()
+        response.status_code = 200
+        response.encoding = "utf-8"
+        response.raw = BytesIO(payload.encode("utf-8"))
+        return response
+
+    monkeypatch.setattr(session, "get", get)
+    path = tmp_path / "archive.sqlite"
+    assert collect(path, session, storage_mode="compact") == 1
+    assert collect(path, session, storage_mode="compact") == 1
+    assert collect(path, session) == 1
+    with closing(sqlite3.connect(path)) as db:
+        stored: list[tuple[bytes]] = db.execute(
+            "SELECT payload FROM tunnel_payloads"
+        ).fetchall()
+        rows: list[tuple[str, str, str, str]] = db.execute(
+            "SELECT source, requested_at, available_at, error "
+            "FROM tunnel_observations ORDER BY id"
+        ).fetchall()
+        groups: list[tuple[int]] = db.execute(
+            "SELECT count(*) FROM tunnel_observations GROUP BY collection_id"
+        ).fetchall()
+        raw_count: list[tuple[int]] = db.execute(
+            "SELECT count(*) FROM tunnel_inputs"
+        ).fetchall()
+    assert {zlib.decompress(row[0]).decode("utf-8") for row in stored} == {
+        payload,
+        "",
+    }
+    assert groups == [(9,), (9,)]
+    assert raw_count == [(9,)]
+    assert all(row[1] <= row[2] for row in rows)
+    assert rows[8][0::3] == ("margin", "ValueError")
