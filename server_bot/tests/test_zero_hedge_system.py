@@ -272,7 +272,7 @@ def test_cleanup_attempts_both_position_closes_even_if_cancel_fails(
     link = bot.state.hedge_state["orders"]["Long"]["link"]
     hedged.exchange.orders[link]["orderStatus"] = "PartiallyFilled"
 
-    def failed_cancel(*args):
+    def failed_cancel(*args) -> None:
         """Failed cancel."""
         message = "cancel unavailable"
         raise BybitDemoError(message)

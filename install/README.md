@@ -23,20 +23,21 @@ Copy or check out the project on the VPS under the account that will run the bot
 local filesystem, for example `$HOME/server-bot`; the application writes state, lock, and SQLite
 files beside its source. Do not copy a `.venv` from macOS or another machine.
 
-Install `curl` if the VPS image does not include it, install `uv` as the service user, and create
-the environment:
+Install the download prerequisites if needed:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y curl
+sudo apt-get install -y ca-certificates curl
 cd "$HOME/server-bot/install"
-command -v uv || curl -LsSf https://astral.sh/uv/install.sh | sh
-source "$HOME/.local/bin/env"
-uv sync --project ../server_bot
 ```
 
-If the project is installed elsewhere, substitute its actual `install` path. `uv` obtains the
-Python version required by the project, so Debian 11's older system Python is not a blocker.
+Run `sh install.sh` below as the account that will run the services. It reuses uv from
+`PATH` or `$HOME/.local/bin`, or installs uv 0.13.7 into `$HOME/.local/bin` when
+missing. It then syncs locked dependencies and installs the services. No existing
+Python installation is required: uv obtains the project's required Python version.
+The bootstrap does not modify shell profiles. For later `uv` commands, add
+`$HOME/.local/bin` to `PATH`, for example `export PATH="$HOME/.local/bin:$PATH"`.
+If the project is installed elsewhere, substitute its actual `install` path.
 
 Enable lingering once per VPS so the user services start at boot and survive SSH logout.
 Persistent journaling and membership in `systemd-journal` allow the service user to collect logs
@@ -94,10 +95,15 @@ The default installation enables `smtp-monitor.timer`. It checks bot health ever
 the first alarm after a problem persists for two minutes, repeats unresolved alarms hourly, and
 sends a recovery message. Use `--entity smtp` to manage only the monitor.
 
-Run the installer from the deployment's `install` directory:
+Run the installer from the deployment's `install` directory. Bootstrap arguments
+are forwarded to `bot_services.py install`, for example
+`sh install.sh --entity data-saver --no-start`. The script also works when invoked
+by absolute path from another directory. Service setup still requires the one-time
+systemd configuration above; the bootstrap does not use sudo or configure lingering.
 
 ```bash
-uv run --project ../server_bot python bot_services.py install
+sh install.sh
+export PATH="$HOME/.local/bin:$PATH"
 uv run --project ../server_bot python bot_services.py check
 uv run --project ../server_bot python bot_services.py status
 uv run --project ../server_bot python bot_services.py collect-logs --since "7 days ago"
@@ -182,8 +188,8 @@ No trading configuration, exchange credentials, account state, or SMTP setup is
 required. From the application directory (`server_bot/`):
 
 ```bash
-uv sync --locked
-uv run python ../install/bot_services.py install --entity data-saver
+sh ../install/install.sh --entity data-saver
+export PATH="$HOME/.local/bin:$PATH"
 uv run python ../install/bot_services.py check --entity data-saver
 ```
 

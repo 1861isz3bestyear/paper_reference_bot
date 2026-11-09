@@ -1,3 +1,4 @@
+# Copyright 2026 avwap-workspace-tests contributors
 """Opt-in tests for services already installed in a Linux user systemd manager."""
 
 from __future__ import annotations
@@ -7,9 +8,8 @@ import subprocess
 import tarfile
 from pathlib import Path
 
-import pytest
-
 import bot_services
+import pytest
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_SYSTEMD_INTEGRATION") != "1",
@@ -31,11 +31,12 @@ def layout() -> bot_services.Layout:
 def test_generated_units_are_valid_and_use_resume(
     layout: bot_services.Layout,
 ) -> None:
+    """Verify generated units are valid and use resume."""
     unit_paths = [
         layout.unit_dir / name for name in bot_services.service_names()
     ]
     assert all(path.is_file() for path in unit_paths)
-    command(
+    _ = command(
         "systemd-analyze",
         "--user",
         "verify",
@@ -56,6 +57,7 @@ def test_generated_units_are_valid_and_use_resume(
 
 
 def test_all_services_are_enabled_active_and_unique() -> None:
+    """Verify all services are enabled active and unique."""
     for state in ("is-enabled", "is-active"):
         result = command(
             "systemctl", "--user", state, *bot_services.service_names()
@@ -68,6 +70,7 @@ def test_all_services_are_enabled_active_and_unique() -> None:
 
 
 def test_demo_service_restarts_and_writes_to_journal() -> None:
+    """Verify demo service restarts and writes to journal."""
     before = command(
         "systemctl",
         "--user",
@@ -76,7 +79,7 @@ def test_demo_service_restarts_and_writes_to_journal() -> None:
         "--property=MainPID",
         "--value",
     ).stdout.strip()
-    command("systemctl", "--user", "restart", "bybit-demo.service")
+    _ = command("systemctl", "--user", "restart", "bybit-demo.service")
     assert (
         command(
             "systemctl", "--user", "is-active", "bybit-demo.service"
@@ -107,6 +110,7 @@ def test_demo_service_restarts_and_writes_to_journal() -> None:
 def test_diagnostic_archive_contains_every_service(
     layout: bot_services.Layout, tmp_path: Path
 ) -> None:
+    """Verify diagnostic archive contains every service."""
     archive = bot_services.collect_logs(layout, tmp_path, since="1 hour ago")
     assert archive.is_file()
     with tarfile.open(archive, "r:gz") as bundle:

@@ -56,6 +56,9 @@ preview = true
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
+    # PT009 prescribes pytest's rewritten assert statements; S101 forbids
+    # that assertion form. Keep PT009 and use explicit production validation.
+    "assert",
     # D203 requires a blank line before class docstrings; D211 forbids it.
     "incorrect-blank-line-before-class",
     # D213 requires summaries on line two; D212 requires the first line.

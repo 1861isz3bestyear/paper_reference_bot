@@ -108,7 +108,7 @@ def test_client_public_and_private_helpers(
     ])
     requests = []
 
-    def open_(request, timeout):
+    def open_(request: pytest.FixtureRequest, timeout) -> Response:
         """Open."""
         requests.append(request)
         return Response(next(payloads))
@@ -557,7 +557,7 @@ def test_reconcile_fetches_only_incremental_candles_after_initial_history(
     monkeypatch.setattr(cli, "STATE_FILE", tmp_path / "state.json")
     requests = []
 
-    def fetch(_symbol, _timeframe, start_ms, end_ms):
+    def fetch(_symbol, _timeframe, start_ms, end_ms) -> pd.DataFrame:
         """Fetch."""
         requests.append((start_ms, end_ms))
         latest_ms = end_ms // 60_000 * 60_000 - 60_000
@@ -848,7 +848,7 @@ def test_client_never_targets_mainnet_and_signs_post_body(
 ) -> None:
     """Verify client never targets mainnet and signs post body."""
     captured = []
-    monkeypatch.setattr(client_module.time, "time", lambda: 1234.567)
+    monkeypatch.setattr(client_module, "epoch_seconds", lambda: 1234.567)
     monkeypatch.setattr(
         client_module,
         "urlopen",
@@ -992,9 +992,9 @@ def test_timestamp_retry_only_replays_reads(
     """Verify timestamp retry only replays reads."""
     requests = []
     ticks = iter([1000, 1001])
-    monkeypatch.setattr(client_module.time, "time", lambda: next(ticks))
+    monkeypatch.setattr(client_module, "epoch_seconds", lambda: next(ticks))
 
-    def respond(request, timeout):
+    def respond(request: pytest.FixtureRequest, timeout) -> Response:
         """Respond."""
         requests.append(request)
         return Response({"retCode": 10002, "retMsg": "timestamp rejected"})
@@ -1036,15 +1036,15 @@ def test_loop_wait_for_protection_and_rate_limits(
     )
     monkeypatch.setattr(cli.signal, "signal", lambda *_: None)
     ticks = [0]
-    monkeypatch.setattr(cli.time, "monotonic", lambda: ticks[0])
+    monkeypatch.setattr(cli, "monotonic", lambda: ticks[0])
 
-    def sleep(seconds):
+    def sleep(seconds) -> None:
         """Sleep."""
         ticks[0] += seconds
         if ticks[0] >= expected:
             bot.stop()
 
-    monkeypatch.setattr(cli.time, "sleep", sleep)
+    monkeypatch.setattr(cli, "sleep", sleep)
     bot.run(10)
     if ticks[0] != expected:
         pytest.fail("Expected ticks[0] == expected")

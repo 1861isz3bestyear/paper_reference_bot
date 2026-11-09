@@ -7,6 +7,7 @@ import json
 import threading
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
@@ -47,7 +48,7 @@ def exchange_http():
         ],
     )
 
-    def fill(link):
+    def fill(link) -> None:
         """Fill."""
         order = state.orders[link]
         order["orderStatus"] = "Filled"
@@ -82,10 +83,16 @@ def exchange_http():
     class Handler(BaseHTTPRequestHandler):
         """Represent handler."""
 
-        def log_message(self, *_):
+        def log_message(self, *_) -> None:
             """Log message."""
 
-        def respond(self, result=None, code=0, message="OK", status=200):
+        def respond(
+            self,
+            result=None,
+            code: int = 0,
+            message: str = "OK",
+            status: int = 200,
+        ) -> None:
             """Respond."""
             data = json.dumps(
                 {"retCode": code, "retMsg": message, "result": result or {}}
@@ -95,7 +102,7 @@ def exchange_http():
             self.end_headers()
             _ = self.wfile.write(data)
 
-        def handle_request(self):
+        def handle_request(self) -> None:
             """Handle request."""
             url = urlsplit(self.path)
             body = self.rfile.read(
@@ -256,7 +263,7 @@ def exchange_http():
 
 
 @pytest.fixture
-def system(tmp_path, monkeypatch, exchange_http):
+def system(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exchange_http):
     """System."""
     from bybit_demo_bot import cli as demo
     from bybit_demo_bot import replica

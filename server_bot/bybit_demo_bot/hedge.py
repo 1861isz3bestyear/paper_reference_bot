@@ -25,7 +25,7 @@ class HedgeReplicaBot(BybitDemoBot):
     EXECUTOR_NAME = "Bybit VWAP zero hedge"
     MAX_RETRY_SECONDS = 10
 
-    def __init__(self, config, client, state, *, target_path=None):
+    def __init__(self, config, client, state, *, target_path=None) -> None:
         """Initialize the instance."""
         super().__init__(config, client, state)
         if (

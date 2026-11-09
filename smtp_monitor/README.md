@@ -25,3 +25,9 @@ systemctl --user status smtp-monitor.timer --no-pager
 journalctl --user-unit smtp-monitor.service --since "1 hour ago" --no-pager -o cat
 systemctl --user start smtp-monitor.service
 ```
+
+Exchange positions are validated before comparison: rows must be objects, sizes
+must be finite and nonnegative, and an active side must be `Buy` or `Sell`.
+Malformed responses become `position-check` findings rather than valid positions.
+Persisted alert timestamps must also be finite numbers; malformed timestamps
+fail the monitor run, preserving the existing state file for diagnosis.

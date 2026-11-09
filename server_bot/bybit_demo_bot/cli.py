@@ -9,11 +9,11 @@ import json
 import logging
 import signal
 import sys
-import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
+from time import monotonic, sleep
 
 import pandas as pd
 import requests
@@ -345,7 +345,7 @@ class BybitDemoBot:
                 )
                 + "\n"
             )
-            sys.stdout.flush()
+            _ = sys.stdout.flush()
         self.state.observed_position_side = observed
         if self.REFERENCE_ALIGNED:
             if exchange_closed and not self.state.pending_strategy_close:
@@ -449,14 +449,14 @@ class BybitDemoBot:
         _ = sys.stdout.write(
             str(f"{self.EXECUTOR_NAME} executor started: {self.symbol}") + "\n"
         )
-        sys.stdout.flush()
+        _ = sys.stdout.flush()
         retry_seconds = poll_seconds
         last_action = None
         last_action_log = float("-inf")
         while self.running:
             try:
                 action = self.reconcile_once()
-                log_now = time.monotonic()
+                log_now = monotonic()
                 repeated_flat_halt = (
                     action == last_action
                     and action is not None
@@ -469,7 +469,7 @@ class BybitDemoBot:
                     _ = sys.stdout.write(
                         str(f"{datetime.now(UTC).isoformat()} {action}") + "\n"
                     )
-                    sys.stdout.flush()
+                    _ = sys.stdout.flush()
                     last_action_log = log_now
                 last_action = action
                 retry_seconds = poll_seconds
@@ -489,16 +489,16 @@ class BybitDemoBot:
                     )
                     + "\n"
                 )
-                sys.stdout.flush()
+                _ = sys.stdout.flush()
                 wait_seconds = retry_seconds
                 retry_seconds = min(retry_seconds * 2, self.MAX_RETRY_SECONDS)
             else:
                 wait_seconds = (
                     1 if self.state.pending_protection_side else poll_seconds
                 )
-            deadline = time.monotonic() + wait_seconds
-            while self.running and time.monotonic() < deadline:
-                time.sleep(min(1, deadline - time.monotonic()))
+            deadline = monotonic() + wait_seconds
+            while self.running and monotonic() < deadline:
+                sleep(min(1, deadline - monotonic()))
 
 
 class ReferenceAlignedDemoBot(BybitDemoBot):

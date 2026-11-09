@@ -74,7 +74,7 @@ def test_atomic_target_publication_never_exposes_partial_json(system) -> None:
     errors = []
     started = threading.Event()
 
-    def writer():
+    def writer() -> None:
         """Writer."""
         try:
             started.set()

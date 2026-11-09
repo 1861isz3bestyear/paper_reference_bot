@@ -41,13 +41,27 @@ jobs:
           apt-get -o Acquire::Retries=3 -o Acquire::http::No-Cache=true update
           apt-get -o Acquire::Retries=3 -o Acquire::http::No-Cache=true install -y --no-install-recommends ca-certificates curl git
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: "0.13.7"
-          enable-cache: false
-      - name: Install locked application and test dependencies
+      - name: Bootstrap from missing uv and install standalone saver units
         id: dependencies
-        run: uv sync --locked --project server_bot
+        run: |
+          ! command -v uv
+          test ! -e "$HOME/.local/bin/uv"
+          mkdir -p test-results/systemd-stubs
+          # Containers have no user manager. Only systemd commands are stubbed;
+          # uv download, Python provisioning, dependency sync and unit writes run.
+          for command in systemctl systemd-analyze; do
+            printf '#!/bin/sh\nexit 0\n' > "test-results/systemd-stubs/$command"
+            chmod +x "test-results/systemd-stubs/$command"
+          done
+          export PATH="$PWD/test-results/systemd-stubs:$PATH"
+          sh install/install.sh --entity data-saver --no-start
+          test -f "$HOME/.config/systemd/user/paper-data-saver.service"
+          grep -F "$HOME/.local/bin/uv" "$HOME/.config/systemd/user/paper-data-saver.service"
+          # Re-running must reuse uv and work from outside the deployment.
+          (cd /tmp && sh "$GITHUB_WORKSPACE/install/install.sh" --entity data-saver --no-start)
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Test bootstrap failure paths and argument forwarding
+        run: sh install/test_bootstrap.sh
       - name: Check installed CLI entry points
         working-directory: server_bot
         run: |

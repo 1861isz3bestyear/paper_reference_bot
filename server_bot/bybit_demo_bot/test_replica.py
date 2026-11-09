@@ -150,7 +150,7 @@ def test_reference_close_and_same_direction_reentry_are_copied(
 ) -> None:
     """Verify reference close and same direction reentry are copied."""
     bot, client, target = setup
-    bot.reconcile_once(NOW)
+    _ = bot.reconcile_once(NOW)
     fill(bot, client)
     target(side=None)
     if "submitted reduce Buy" not in (bot.reconcile_once(NOW)):
@@ -172,7 +172,7 @@ def test_same_side_new_reference_trade_is_not_mistaken_for_old_position(
 ) -> None:
     """Verify same side new reference trade is not mistaken for old position."""
     bot, client, target = setup
-    bot.reconcile_once(NOW)
+    _ = bot.reconcile_once(NOW)
     fill(bot, client)
     # Close and reopen happened between polls: same side/quantity but new identity.
     target(entry="2026-09-13T14:16:01+00:00")
@@ -186,10 +186,10 @@ def test_same_side_new_reference_trade_is_not_mistaken_for_old_position(
 def test_reverse_confirms_flat_before_opening(setup: ReplicaSetup) -> None:
     """Verify reverse confirms flat before opening."""
     bot, client, target = setup
-    bot.reconcile_once(NOW)
+    _ = bot.reconcile_once(NOW)
     fill(bot, client)
     target(side="Long", entry="2026-09-13T14:16:01+00:00")
-    bot.reconcile_once(NOW)
+    _ = bot.reconcile_once(NOW)
     if (client.market_order.call_args.kwargs["reduce_only"]) is not (True):
         pytest.fail(
             "Expected client.market_order.call_args.kwargs['reduce_only'] is"
@@ -279,7 +279,7 @@ def test_partial_fill_does_not_trigger_duplicate_entry(
 ) -> None:
     """Verify partial fill does not trigger duplicate entry."""
     bot, client, _ = setup
-    bot.reconcile_once(NOW)
+    _ = bot.reconcile_once(NOW)
     client.position.return_value = {
         "side": "Sell",
         "size": "2",
@@ -299,7 +299,7 @@ def test_failed_order_halts_and_flattens_partial_position(
 ) -> None:
     """Verify failed order halts and flattens partial position."""
     bot, client, _ = setup
-    bot.reconcile_once(NOW)
+    _ = bot.reconcile_once(NOW)
     client.position.return_value = {
         "side": "Sell",
         "size": "2",
@@ -328,7 +328,7 @@ def test_timeout_halts_cancels_and_late_fill_is_closed(
 ) -> None:
     """Verify timeout halts cancels and late fill is closed."""
     bot, client, target = setup
-    bot.reconcile_once(NOW)
+    _ = bot.reconcile_once(NOW)
     later = NOW + timedelta(seconds=61)
     target(now=later)
     if "trading halted" not in (bot.reconcile_once(later)):
@@ -390,7 +390,7 @@ def test_stale_reference_during_pending_entry_still_halts(
 ) -> None:
     """Verify stale reference during pending entry still halts."""
     bot, client, target = setup
-    bot.reconcile_once(NOW)
+    _ = bot.reconcile_once(NOW)
     target(published_at="2026-09-13T14:10:00+00:00")
     if "trading halted" not in (bot.reconcile_once(NOW)):
         pytest.fail("Expected 'trading halted' in bot.reconcile_once(NOW)")
@@ -416,7 +416,7 @@ def test_unexpected_external_close_does_not_create_reentry_loop(
 ) -> None:
     """Verify unexpected external close does not create reentry loop."""
     bot, client, _ = setup
-    bot.reconcile_once(NOW)
+    _ = bot.reconcile_once(NOW)
     fill(bot, client)
     client.position.return_value = None
     if "trading halted" not in (bot.reconcile_once(NOW)):
@@ -451,7 +451,7 @@ def test_legacy_unresolved_entry_blocks_migration(setup: ReplicaSetup) -> None:
 def test_new_reference_run_replaces_existing_trade(setup: ReplicaSetup) -> None:
     """Verify new reference run replaces existing trade."""
     bot, client, target = setup
-    bot.reconcile_once(NOW)
+    _ = bot.reconcile_once(NOW)
     fill(bot, client)
     target(reference_run="2026-09-13T14:00:00+00:00")
     if "submitted reduce" not in (bot.reconcile_once(NOW)):
@@ -474,7 +474,7 @@ def test_failed_cancellation_does_not_prevent_emergency_close(
 ) -> None:
     """Verify failed cancellation does not prevent emergency close."""
     bot, client, target = setup
-    bot.reconcile_once(NOW)
+    _ = bot.reconcile_once(NOW)
     client.position.return_value = {
         "side": "Sell",
         "size": "1",
@@ -499,9 +499,9 @@ def test_default_demo_command_uses_replica_executor(
     from bybit_demo_bot import replica
 
     config_path = tmp_path / "config.json"
-    config_path.write_text(config(ticker="XRP_USDT").to_json())
+    _ = config_path.write_text(config(ticker="XRP_USDT").to_json())
     env = tmp_path / "demo.env"
-    env.write_text("BYBIT_API_KEY=test\nBYBIT_API_SECRET=test\n")
+    _ = env.write_text("BYBIT_API_KEY=test\nBYBIT_API_SECRET=test\n")
     monkeypatch.setattr(cli, "STATE_FILE", tmp_path / "demo.json")
     monkeypatch.setattr(cli, "LOCK_FILE", tmp_path / "demo.lock")
     factory = Mock()
@@ -580,10 +580,10 @@ def test_rejected_close_cannot_open_opposite_position(
 ) -> None:
     """Verify rejected close cannot open opposite position."""
     bot, client, target = setup
-    bot.reconcile_once(NOW)
+    _ = bot.reconcile_once(NOW)
     fill(bot, client)
     target(side="Long")
-    bot.reconcile_once(NOW)
+    _ = bot.reconcile_once(NOW)
     client.order_by_link.return_value = {"orderStatus": "Rejected"}
     if "trading halted" not in (bot.reconcile_once(NOW)):
         pytest.fail("Expected 'trading halted' in bot.reconcile_once(NOW)")
@@ -619,7 +619,7 @@ def test_startup_missing_target_eventually_halts(setup: ReplicaSetup) -> None:
     """Verify startup missing target eventually halts."""
     bot, client, _ = setup
     bot.target_path.unlink()
-    bot.reconcile_once(NOW)
+    _ = bot.reconcile_once(NOW)
     if "trading halted" not in (
         bot.reconcile_once(NOW + timedelta(seconds=121))
     ):
@@ -635,7 +635,7 @@ def test_restart_accepts_already_filled_order_even_after_timeout(
 ) -> None:
     """Verify restart accepts already filled order even after timeout."""
     bot, client, target = setup
-    bot.reconcile_once(NOW)
+    _ = bot.reconcile_once(NOW)
     later = NOW + timedelta(minutes=2)
     target(now=later)
     client.order_by_link.return_value = {"orderStatus": "Filled"}
@@ -678,7 +678,7 @@ def test_slow_position_request_cannot_make_fresh_heartbeat_look_future(
 
     monkeypatch.setattr(module, "datetime", Clock)
 
-    def slow_position(_):
+    def slow_position(_) -> None:
         """Slow position."""
         clock[0] += timedelta(seconds=10)
         target(now=clock[0])
@@ -716,7 +716,7 @@ def test_heartbeat_error_records_measured_age_and_timestamps(
     with pytest.raises(
         RuntimeError, match="age=-10.000s; published_at=.*checked_at="
     ):
-        bot._target(NOW)
+        _ = bot._target(NOW)
 
 
 def test_halted_flat_state_clears_old_position_but_preserves_order_intent(
@@ -729,7 +729,7 @@ def test_halted_flat_state_clears_old_position_but_preserves_order_intent(
     bot.state.replica_position_id = "old"
     bot.state.replica_order = {"link": "old-order"}
     client.order_by_link.return_value = None
-    bot.reconcile_once(NOW)
+    _ = bot.reconcile_once(NOW)
     saved = cli.DemoState.load_or_create(True)
     if (saved.observed_position_side) is not (None):
         pytest.fail("Expected saved.observed_position_side is None")
@@ -858,15 +858,15 @@ def test_repeated_flat_halt_logs_are_throttled_but_reconciliation_continues(
     bot, _client, _ = setup
     ticks = [0.0]
     monkeypatch.setattr(cli.signal, "signal", lambda *_: None)
-    monkeypatch.setattr(cli.time, "monotonic", lambda: ticks[0])
+    monkeypatch.setattr(cli, "monotonic", lambda: ticks[0])
 
-    def sleep(seconds):
+    def sleep(seconds) -> None:
         """Sleep."""
         ticks[0] += seconds
         if ticks[0] >= 65:
             bot.stop()
 
-    monkeypatch.setattr(cli.time, "sleep", sleep)
+    monkeypatch.setattr(cli, "sleep", sleep)
     bot.reconcile_once = Mock(
         return_value="trading halted: saved reason; exchange position flat"
     )

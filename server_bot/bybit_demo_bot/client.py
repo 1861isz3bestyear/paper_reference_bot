@@ -6,9 +6,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import time
 from dataclasses import dataclass
 from decimal import Decimal
+from time import time as epoch_seconds
 from typing import TYPE_CHECKING, Protocol, Self, cast, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -98,7 +98,7 @@ class BybitDemoClient:
         self, method: str, path: str, values: Mapping[str, object] | None = None
     ) -> dict[str, object]:
         values = values or {}
-        timestamp = str(int(time.time() * 1000))
+        timestamp = str(int(epoch_seconds() * 1000))
         query = urlencode(sorted(values.items())) if method == "GET" else ""
         body_text = (
             "" if method == "GET" else json.dumps(values, separators=(",", ":"))

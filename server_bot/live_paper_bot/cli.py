@@ -605,7 +605,7 @@ class PaperBot:
                         )
                         + "\n"
                     )
-                    sys.stdout.flush()
+                    _ = sys.stdout.flush()
             # This cursor is persisted only after the ledger transition above succeeds.
             self.state.last_processed_candle = candle_time.isoformat()
             self.state.save(self.state_path)
@@ -640,7 +640,7 @@ class PaperBot:
             )
             + "\n"
         )
-        sys.stdout.flush()
+        _ = sys.stdout.flush()
         self.market_feed.start()
         try:
             while self.running:
@@ -662,7 +662,7 @@ class PaperBot:
                         )
                         + "\n"
                     )
-                    sys.stdout.flush()
+                    _ = sys.stdout.flush()
                     self._wait(retry_seconds)
                     retry_seconds = min(retry_seconds * 2, 60)
         finally:
@@ -961,7 +961,15 @@ def stats_command(config_path: Path = PAPER_BOT_CONFIG_FILE) -> None:
         line(f"  Exit reason: {trade.get('exit_reason', '-')}")
 
 
-def parse_args() -> argparse.Namespace:
+class Arguments(argparse.Namespace):
+    """Typed command options populated by the argument parser."""
+
+    command: str = ""
+    config: Path = PAPER_BOT_CONFIG_FILE
+    resume: bool = False
+
+
+def parse_args() -> Arguments:
     """Parse args."""
     parser = argparse.ArgumentParser(
         description="Persistent local-only Bybit-data paper trading bot"
@@ -987,7 +995,7 @@ def parse_args() -> argparse.Namespace:
         _ = subparser.add_argument(
             "--config", type=Path, default=PAPER_BOT_CONFIG_FILE
         )
-    return parser.parse_args()
+    return parser.parse_args(namespace=Arguments())
 
 
 def main() -> None:

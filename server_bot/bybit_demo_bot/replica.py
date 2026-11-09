@@ -51,7 +51,7 @@ class ReferenceReplicaBot(BybitDemoBot):
 
     def __init__(
         self, config, client, state, *, target_path: Path | None = None
-    ):
+    ) -> None:
         """Initialize the instance."""
         super().__init__(config, client, state)
         self.target_path = target_path or ROOT / "reference_target.json"
@@ -168,7 +168,7 @@ class ReferenceReplicaBot(BybitDemoBot):
                 _ = sys.stdout.write(
                     str(f"replica cancellation error; will retry: {exc}") + "\n"
                 )
-                sys.stdout.flush()
+                _ = sys.stdout.flush()
         if position:
             _ = self.client.market_order(
                 self.symbol,

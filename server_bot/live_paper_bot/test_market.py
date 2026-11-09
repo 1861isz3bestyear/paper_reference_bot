@@ -22,7 +22,7 @@ from live_paper_bot.market import (
 )
 
 
-def candle_frame(times=("2026-01-01T00:00:00Z",)):
+def candle_frame(times=("2026-01-01T00:00:00Z",)) -> pd.DataFrame:
     """Candle frame."""
     return pd.DataFrame({
         "time": pd.to_datetime(list(times)),
@@ -232,7 +232,7 @@ def test_mexc_taker_fee_comes_from_exchange(
         )
 
 
-def websocket_message(confirm=True):
+def websocket_message(confirm: bool = True) -> str:
     """Websocket message."""
     return json.dumps({
         "topic": "kline.5.BTCUSDT",
@@ -281,11 +281,11 @@ def test_websocket_worker_subscribes_and_stops_after_confirmed_candle() -> None:
             """Enter the response context."""
             return self
 
-        def __exit__(self, *_):
+        def __exit__(self, *_) -> None:
             """Release the response context."""
             return
 
-        def send(self, value):
+        def send(self, value) -> None:
             """Send."""
             self.sent = json.loads(value)
 
@@ -295,7 +295,7 @@ def test_websocket_worker_subscribes_and_stops_after_confirmed_candle() -> None:
 
     feed = None
 
-    def on_candle(frame):
+    def on_candle(frame) -> None:
         """On candle."""
         received.append(frame)
         feed._stop.set()
