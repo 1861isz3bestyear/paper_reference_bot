@@ -168,7 +168,7 @@ def test_archive_margin_signing(
     """Sign the read-only margin endpoint without persisting credentials."""
     monkeypatch.setenv("BYBIT_API_KEY", "fixture-key")
     monkeypatch.setenv("BYBIT_API_SECRET", "fixture-secret")
-    get = Mock(return_value=Mock(text='{"result": {}}'))
+    get = Mock(return_value=Mock(text='{"result":{},"code":"00000","data":[]}'))
     session = Mock(get=get)
     failures = tunnel_archive.collect(tmp_path / "archive.sqlite", session)
     if failures != 0:

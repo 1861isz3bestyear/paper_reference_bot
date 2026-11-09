@@ -434,3 +434,59 @@ Replace the uv path with the absolute executable path from the installed unit
 Then run `systemctl --user daemon-reload` and
 `systemctl --user restart paper-gex-archive.service`. This changes only the
 standalone GEX collector; bot-owned automatic collection still uses raw mode.
+
+### Bitget lending inputs
+
+Every archive pass also requests the same public Bitget feeds as the local
+calculator, for the selected BTC or ETH asset:
+
+- `bitget_growth_24h`: hourly base-coin margin-loan growth, using `period=24h`.
+- `bitget_growth_30d`: daily growth history, using `period=30d`.
+- `bitget_loan_rate`: current VIP0 daily/annual interest quote.
+
+All three feeds use the same collection cycle as the other sources. With
+`--poll-seconds 600`, each is archived every ten minutes; there is no separate
+Bitget polling loop.
+
+These requests require no API key. They are spaced at least one second apart
+within each collector process. Bitget API errors and missing data are recorded
+as failures even when HTTP status is 200; failed response bodies remain archived.
+Both raw and compact modes retain the exchange timestamps inside the original
+JSON plus local request/receipt timestamps for each observation. Existing
+archives remain readable and new source rows are appended after an upgrade.
+No migration, reset or new systemd override is required.
+
+The growth oscillator uses 14 growth observations; the current loan-rate quote
+is separate context and is not a substitute for historical growth. Collecting
+every ten minutes does not turn hourly/daily exchange history into ten-minute
+observations. Bitget history may be revised; receipt times remain necessary for
+causal replay. This collector archives inputs; it does not calculate oscillator
+values or add compact-archive import support to the calculator.
+
+Bybit margin-rate history remains an independent authenticated source. Put
+`BYBIT_API_KEY` and `BYBIT_API_SECRET` in a private file and reference its absolute
+path with `EnvironmentFile=` under the GEX service's `[Service]` override. The
+collector does not implicitly load `.env` files. A missing margin key does not
+prevent public Bitget, Deribit or Bybit sources from being archived.
+
+### Updating a VPS installation
+
+After the new version has been committed and pushed to your repository, run
+these commands on the VPS (adjust the checkout path if needed):
+
+```bash
+cd ~/paper_reference_bot
+git pull --ff-only
+cd server_bot
+~/.local/bin/uv sync --locked
+systemctl --user restart paper-gex-archive.service
+journalctl --user-unit=paper-gex-archive.service -n 20 --no-pager
+```
+
+The installed service override and databases are retained; do not reset state
+or rerun installation for an ordinary code update. Use the installed uv path
+if yours differs. A restart collects immediately; with a 600-second override,
+subsequent polls target ten-minute UTC boundaries. A successful pass now records
+12 sources (11 public plus authenticated Bybit margin history). Without Bybit
+margin credentials, one failure is expected, but inspect source errors to
+identify the actual failing source rather than assuming it is margin.
