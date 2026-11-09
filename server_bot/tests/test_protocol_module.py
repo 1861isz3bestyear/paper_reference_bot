@@ -1,17 +1,21 @@
 # Copyright 2026 anchored-vwam-backtest contributors
 """Subsystem tests through real HTTP and filesystem boundaries."""
 
-import json
 import logging
 import threading
 from decimal import Decimal
-from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 
 from bybit_demo_bot.client import BybitDemoClient, BybitDemoError
+from reference_bot.cli import BotState
 from reference_bot.trading import LocalPosition
 from shared.reference_target import publish_target
+from shared.validation import json_object
+
+if TYPE_CHECKING:
+    from tests.conftest import ExchangeState, TradingSystem
 
 LOGGER = logging.getLogger(__name__)
 
@@ -19,30 +23,25 @@ pytestmark = pytest.mark.module
 
 
 def test_http_client_signs_requests_and_reports_authentication_failure(
-    exchange_http,
+    exchange_http: ExchangeState,
 ) -> None:
     """Verify http client signs requests and reports authentication failure."""
     client = BybitDemoClient(
         "test-key", "test-secret", base_url=exchange_http.url, timeout=2
     )
-    if client.available_usdt() != Decimal(10000):
-        pytest.fail("Expected client.available_usdt() == Decimal(10000)")
-    if (client.position("BTCUSDT")) is not (None):
-        pytest.fail("Expected client.position('BTCUSDT') is None")
+    assert client.available_usdt() == Decimal(10000)
+    assert client.position("BTCUSDT") is None
     order = client.market_order(
         "BTCUSDT", "Buy", Decimal(2), order_link_id="module-order"
     )
-    if order != "module-order":
-        pytest.fail("Expected order == 'module-order'")
-    if client.position("BTCUSDT")["size"] != "2":
-        pytest.fail("Expected client.position('BTCUSDT')['size'] == '2'")
-    if client.order_by_link("BTCUSDT", order)["orderStatus"] != "Filled":
-        pytest.fail(
-            "Expected client.order_by_link('BTCUSDT', order)['orderStatus'] =="
-            " 'Filled'"
-        )
-    if client.has_open_orders("BTCUSDT"):
-        pytest.fail("Expected not client.has_open_orders('BTCUSDT')")
+    assert order == "module-order"
+    position = client.position("BTCUSDT")
+    assert position is not None
+    assert position["size"] == "2"
+    saved_order = client.order_by_link("BTCUSDT", order)
+    assert saved_order is not None
+    assert saved_order["orderStatus"] == "Filled"
+    assert not client.has_open_orders("BTCUSDT")
     _ = client.market_order(
         "BTCUSDT",
         "Sell",
@@ -50,8 +49,7 @@ def test_http_client_signs_requests_and_reports_authentication_failure(
         reduce_only=True,
         order_link_id="module-close",
     )
-    if (client.position("BTCUSDT")) is not (None):
-        pytest.fail("Expected client.position('BTCUSDT') is None")
+    assert client.position("BTCUSDT") is None
     invalid = BybitDemoClient(
         "test-key", "wrong-secret", base_url=exchange_http.url, timeout=2
     )
@@ -59,10 +57,12 @@ def test_http_client_signs_requests_and_reports_authentication_failure(
         _ = invalid.available_usdt()
 
 
-def test_atomic_target_publication_never_exposes_partial_json(system) -> None:
+def test_atomic_target_publication_never_exposes_partial_json(
+    system: TradingSystem,
+) -> None:
     """Verify atomic target publication never exposes partial json."""
     reference = system.producer()
-    state = SimpleNamespace(
+    state = BotState(
         launched_at=reference.state.launched_at,
         last_processed_candle="2026-01-01T00:01:00+00:00",
     )
@@ -71,10 +71,10 @@ def test_atomic_target_publication_never_exposes_partial_json(system) -> None:
         "BTCUSDT", "Long", Decimal(10), 100.0, "2026-01-01T00:02:05+00:00"
     )
     publish_target(system.target, reference.config, state, position=flat)
-    errors = []
+    errors: list[Exception] = []
     started = threading.Event()
 
-    def writer():
+    def writer() -> None:
         """Writer."""
         try:
             started.set()
@@ -91,28 +91,17 @@ def test_atomic_target_publication_never_exposes_partial_json(system) -> None:
 
     thread = threading.Thread(target=writer)
     thread.start()
-    if not (started.wait(2)):
-        pytest.fail("Expected started.wait(2)")
+    assert started.wait(2)
     try:
         for _ in range(200):
-            payload = json.loads(system.target.read_text())
-            if ((
+            payload = json_object(system.target.read_text())
+            assert (
                 payload["side"],
                 payload["quantity"],
                 payload["entry_price"],
-            )) not in ([(None, "0", None), ("Long", "10", 100.0)]):
-                pytest.fail(
-                    "Expected (payload['side'], payload['quantity'],"
-                    " payload['entry_price']) in [(None, '0', None), ('Long',"
-                    " '10', 100.0)]"
-                )
+            ) in {(None, "0", None), ("Long", "10", 100.0)}
     finally:
         thread.join(timeout=5)
-    if thread.is_alive():
-        pytest.fail("Expected not thread.is_alive()")
-    if errors:
-        pytest.fail("Expected not errors")
-    if system.target.with_suffix(".json.tmp").exists():
-        pytest.fail(
-            "Expected not system.target.with_suffix('.json.tmp').exists()"
-        )
+    assert not thread.is_alive()
+    assert not errors
+    assert not system.target.with_suffix(".json.tmp").exists()

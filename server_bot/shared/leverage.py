@@ -40,7 +40,7 @@ MAXIMUM_PERCENT = 100
 if TYPE_CHECKING:
     from datetime import date
 
-    from shared.paper_config import PaperBotConfig
+    from shared.strategy_config import StrategyConfig
 
 
 class MarginState(Protocol):
@@ -794,7 +794,7 @@ def leveraged_backtest(
 
 
 def settings_from_config(
-    config: PaperBotConfig, fee_pct: float
+    config: StrategyConfig, fee_pct: float
 ) -> MarginSettings:
     """Handle settings from config.
 
@@ -824,7 +824,7 @@ def settings_from_config(
 def process_margin_history(
     state: MarginState,
     candles: pd.DataFrame,
-    config: PaperBotConfig,
+    config: StrategyConfig,
     *,
     launched_at: pd.Timestamp,
     fee_pct: float,

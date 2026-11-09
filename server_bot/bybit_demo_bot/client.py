@@ -6,18 +6,34 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import time
 from dataclasses import dataclass
 from decimal import Decimal
+from time import time as epoch_seconds
 from typing import TYPE_CHECKING, Protocol, Self, cast, runtime_checkable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import urlencode, urlsplit
+from urllib.request import Request, build_opener
 
 from shared.validation import json_object, object_list, object_mapping
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+
+def open_http(request: Request, *, timeout: float) -> object:
+    """Open an exchange request only over HTTP or HTTPS.
+
+    Returns:
+        The transport response stream.
+
+    Raises:
+        ValueError: If the configured exchange URL uses a non-HTTP scheme.
+
+    """
+    if urlsplit(request.full_url).scheme not in {"http", "https"}:
+        message = "Exchange requests require an HTTP or HTTPS URL"
+        raise ValueError(message)
+    return cast("object", build_opener().open(request, timeout=timeout))
 
 
 @runtime_checkable
@@ -98,7 +114,7 @@ class BybitDemoClient:
         self, method: str, path: str, values: Mapping[str, object] | None = None
     ) -> dict[str, object]:
         values = values or {}
-        timestamp = str(int(time.time() * 1000))
+        timestamp = str(int(epoch_seconds() * 1000))
         query = urlencode(sorted(values.items())) if method == "GET" else ""
         body_text = (
             "" if method == "GET" else json.dumps(values, separators=(",", ":"))
@@ -112,23 +128,35 @@ class BybitDemoClient:
         url = f"{self.base_url.rstrip('/')}{path}" + (
             f"?{query}" if query else ""
         )
-        request = Request(
-            url,
-            data=body_text.encode() if body_text else None,
-            method=method,
-            headers={
-                "X-BAPI-API-KEY": self.api_key,
-                "X-BAPI-TIMESTAMP": timestamp,
-                "X-BAPI-RECV-WINDOW": self.recv_window,
-                "X-BAPI-SIGN": signature,
-                "Content-Type": "application/json",
-                "User-Agent": self.user_agent,
-            },
-        )
-        try:
-            payload = _decode_response(
-                cast("object", urlopen(request, timeout=self.timeout))
+        scheme = urlsplit(url).scheme
+        if scheme not in {"http", "https"}:
+            message = "Exchange requests require an HTTP or HTTPS URL"
+            raise ValueError(message)
+        headers = {
+            "X-BAPI-API-KEY": self.api_key,
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-RECV-WINDOW": self.recv_window,
+            "X-BAPI-SIGN": signature,
+            "Content-Type": "application/json",
+            "User-Agent": self.user_agent,
+        }
+        data = body_text.encode() if body_text else None
+        if scheme == "http":
+            request = Request(
+                f"http://{url.removeprefix('http://')}",
+                data=data,
+                method=method,
+                headers=headers,
             )
+        else:
+            request = Request(
+                f"https://{url.removeprefix('https://')}",
+                data=data,
+                method=method,
+                headers=headers,
+            )
+        try:
+            payload = _decode_response(open_http(request, timeout=self.timeout))
         except HTTPError as exc:
             with exc:
                 detail = exc.read().decode(errors="replace")[:500]

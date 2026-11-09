@@ -1,0 +1,97 @@
+name: Debian compatibility
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: debian-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  debian:
+    name: Debian ${{ matrix.debian }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        debian: ["11", "12"]
+    container:
+      image: debian:${{ matrix.debian }}-slim
+    env:
+      UV_PYTHON: "3.14"
+      UV_PYTHON_PREFERENCE: only-managed
+      RUN_SYSTEMD_INTEGRATION: "0"
+    steps:
+      - name: Install OS dependencies
+        run: |
+          if [ "${{ matrix.debian }}" = "11" ]; then
+            # Bullseye security packages have left the live security mirror.
+            sed -i 's|deb.debian.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list
+            echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99bullseye-archive
+          fi
+          rm -rf /var/lib/apt/lists/*
+          apt-get -o Acquire::Retries=3 -o Acquire::http::No-Cache=true update
+          apt-get -o Acquire::Retries=3 -o Acquire::http::No-Cache=true install -y --no-install-recommends ca-certificates curl git
+      - uses: actions/checkout@v4
+      - name: Bootstrap from missing uv and install standalone saver units
+        id: dependencies
+        run: |
+          ! command -v uv
+          test ! -e "$HOME/.local/bin/uv"
+          mkdir -p test-results/systemd-stubs
+          # Containers have no user manager. Only systemd commands are stubbed;
+          # uv download, Python provisioning, dependency sync and unit writes run.
+          for command in systemctl systemd-analyze; do
+            printf '#!/bin/sh\nexit 0\n' > "test-results/systemd-stubs/$command"
+            chmod +x "test-results/systemd-stubs/$command"
+          done
+          export PATH="$PWD/test-results/systemd-stubs:$PATH"
+          sh install/install.sh --entity data-saver --no-start
+          test -f "$HOME/.config/systemd/user/paper-data-saver.service"
+          grep -F "$HOME/.local/bin/uv" "$HOME/.config/systemd/user/paper-data-saver.service"
+          # Re-running must reuse uv and work from outside the deployment.
+          (cd /tmp && sh "$GITHUB_WORKSPACE/install/install.sh" --entity data-saver --no-start)
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Test bootstrap failure paths and argument forwarding
+        run: sh install/test_bootstrap.sh
+      - name: Check installed CLI entry points
+        working-directory: server_bot
+        run: |
+          uv run --locked python -m server_bot.data_saver --help
+          uv run --locked python -m server_bot.cli --help
+          uv run --locked python -m reference_bot.cli --help
+          uv run --locked python -m live_paper_bot.cli --help
+          uv run --locked python ../install/bot_services.py --help
+      - name: Test application with existing coverage gate
+        working-directory: server_bot
+        run: uv run --locked pytest --junitxml=../test-results/application.xml
+      - name: Test standalone saver end to end
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        working-directory: server_bot
+        run: uv run --locked pytest tests/test_data_saver_e2e.py -m e2e --no-cov --junitxml=../test-results/data-saver-e2e.xml
+      - name: Verify standalone saver coverage
+        working-directory: server_bot
+        run: uv run --locked pytest server_bot/test_data_saver.py --cov-reset --cov=server_bot.data_saver --cov-branch --cov-fail-under=92
+      - name: Test installer and service selection
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        working-directory: install
+        run: uv run --locked --project ../server_bot pytest -q test_bot_services.py --junitxml=../test-results/installer.xml
+      - name: Test SMTP monitor
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        working-directory: smtp_monitor
+        run: uv run --locked --project ../server_bot pytest -q --cov=monitor --cov-report=term-missing --cov-fail-under=90 --junitxml=../test-results/smtp.xml
+      - name: Upload test reports
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian-${{ matrix.debian }}-results
+          path: test-results/
+          if-no-files-found: warn

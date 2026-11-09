@@ -68,7 +68,7 @@ def _optional_config_number(value: object) -> float | None:
     return None if value is None else _config_number(value)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class PaperBotConfig:
     """Persist the server strategies and their exchange execution settings."""
 

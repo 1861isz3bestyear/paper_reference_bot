@@ -11,6 +11,8 @@ import pytest
 from live_paper_bot import market as live_module
 from reference_bot import market as reference_module
 from server_bot import cli, tunnel_archive
+from shared.validation import object_mapping, string
+from tests.mock_support import call_args, call_kwargs
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -94,9 +96,13 @@ def test_mexc_kline_error(
     response = Mock(json=Mock(return_value={"msg": "unavailable"}))
     monkeypatch.setattr("requests.get", Mock(return_value=response))
     with pytest.raises(ValueError, match=r"API error"):
-        _ = market.fetch_completed_mexc_klines("BTCUSDT", "1m", 0, 60000)
+        _ = market.fetch_completed_mexc_klines(
+            "BTCUSDT", "1m", start_ms=0, end_ms=60000
+        )
     with pytest.raises(ValueError, match=r"does not support"):
-        _ = market.fetch_completed_mexc_klines("BTCUSDT", "2m", 0, 60000)
+        _ = market.fetch_completed_mexc_klines(
+            "BTCUSDT", "2m", start_ms=0, end_ms=60000
+        )
 
 
 @pytest.mark.parametrize(
@@ -167,12 +173,15 @@ def test_archive_margin_signing(
     failures = tunnel_archive.collect(tmp_path / "archive.sqlite", session)
     if failures != 0:
         pytest.fail("Expected failures == 0")
-    if "interest-rate-history?currency=USDT" not in get.call_args.args[0]:
+    if "interest-rate-history?currency=USDT" not in string(call_args(get)[0]):
         pytest.fail(
             "Expected 'interest-rate-history?currency=USDT' in"
             " get.call_args.args[0]"
         )
-    if get.call_args.kwargs["headers"]["X-BAPI-API-KEY"] != "fixture-key":
+    if (
+        object_mapping(call_kwargs(get)["headers"])["X-BAPI-API-KEY"]
+        != "fixture-key"
+    ):
         pytest.fail(
             "Expected get.call_args.kwargs['headers']['X-BAPI-API-KEY'] =="
             " 'fixture-key'"

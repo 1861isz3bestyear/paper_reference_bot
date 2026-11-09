@@ -1,15 +1,20 @@
 # Copyright 2026 anchored-vwam-backtest contributors
 """Tests for server bot test bybit tickers."""
 
-from pathlib import Path
+from dataclasses import replace
+from typing import TYPE_CHECKING
 
 import pytest
 
 from bybit_demo_bot.cli import BybitDemoBot, DemoState
+from bybit_demo_bot.client import BybitDemoClient
 from live_paper_bot.config import BYBIT_TICKERS as LIVE_TICKERS
 from live_paper_bot.config import PaperBotConfig as LiveConfig
 from reference_bot.config import BYBIT_TICKERS as REFERENCE_TICKERS
 from reference_bot.config import PaperBotConfig as ReferenceConfig
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 EXPECTED = {
     "BTC_USDT",
@@ -25,49 +30,50 @@ EXPECTED = {
 }
 
 
-def values(ticker):
-    """Values."""
-    return {
-        "strategy_mode": "VWAP band mean reversion",
-        "timeframe": "1m",
-        "trend": True,
-        "open_order_vwap_sigma": 1,
-        "close_order_vwap_sigma": 2,
-        "initial_capital": 14,
-        "stop_loss_pct": 0.4,
-        "allow_immediate_reentry": True,
-        "vwap_anchor_reset_weeks": 2,
-        "data_source": "Bybit REST",
-        "ticker": ticker,
-    }
+def ticker_config(ticker: str) -> ReferenceConfig:
+    """Build a server strategy for a supported perpetual market.
+
+    Returns:
+        The ticker-specific server configuration.
+
+    """
+    return ReferenceConfig(
+        strategy_mode="VWAP band mean reversion",
+        timeframe="1m",
+        trend=True,
+        open_order_vwap_sigma=1,
+        close_order_vwap_sigma=2,
+        initial_capital=14,
+        stop_loss_pct=0.4,
+        allow_immediate_reentry=True,
+        vwap_anchor_reset_weeks=2,
+        data_source="Bybit REST",
+        ticker=ticker,
+    )
 
 
 @pytest.mark.parametrize("ticker", sorted(EXPECTED))
 def test_all_entities_accept_supported_bybit_ticker(
-    ticker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ticker: str, tmp_path: Path
 ) -> None:
     """Verify all entities accept supported bybit ticker."""
-    if not (LIVE_TICKERS == REFERENCE_TICKERS == EXPECTED):
-        pytest.fail("Expected LIVE_TICKERS == REFERENCE_TICKERS == EXPECTED")
-    live, reference = LiveConfig(**values(ticker)), ReferenceConfig(
-        **values(ticker)
-    )
+    assert LIVE_TICKERS == REFERENCE_TICKERS == EXPECTED
+    reference = ticker_config(ticker)
+    path = tmp_path / "config.json"
+    reference.save(path)
+    live = LiveConfig.load(path)
     live.validate()
     reference.validate()
-    monkeypatch.setattr(
-        "bybit_demo_bot.cli.STATE_FILE", tmp_path / "state.json"
-    )
     demo = BybitDemoBot(
-        reference, object(), DemoState("2026-01-01T00:00:00+00:00")
+        reference,
+        BybitDemoClient("test-key", "test-secret"),
+        DemoState("2026-01-01T00:00:00+00:00"),
     )
-    if demo.symbol != ticker.replace("_", ""):
-        pytest.fail("Expected demo.symbol == ticker.replace('_', '')")
+    assert demo.symbol == ticker.replace("_", "")
 
 
 def test_bybit_only_ticker_is_not_accepted_for_mexc() -> None:
     """Verify bybit only ticker is not accepted for mexc."""
-    config = ReferenceConfig(
-        **{**values("XRP_USDT"), "data_source": "MEXC REST"}
-    )
+    config = replace(ticker_config("XRP_USDT"), data_source="MEXC REST")
     with pytest.raises(ValueError, match="MEXC"):
         config.validate()

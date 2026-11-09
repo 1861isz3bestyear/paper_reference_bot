@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from shared.hedge_types import HedgeSnapshot
-    from shared.paper_config import PaperBotConfig
+    from shared.strategy_config import StrategyConfig
 
 
 class ReferencePosition(Protocol):
@@ -55,7 +55,7 @@ class ReferenceState(Protocol):
     hedge_state: HedgeSnapshot | None
 
 
-def config_fingerprint(config: PaperBotConfig) -> str:
+def config_fingerprint(config: StrategyConfig) -> str:
     # Invalidate snapshots produced by the old, noncausal fill engine.
     """Handle config fingerprint.
 
@@ -70,7 +70,7 @@ def config_fingerprint(config: PaperBotConfig) -> str:
 
 def publish_target(
     path: Path,
-    config: PaperBotConfig,
+    config: StrategyConfig,
     state: ReferenceState,
     *,
     position: ReferencePosition,

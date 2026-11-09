@@ -6,15 +6,18 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import ClassVar, override
 
 from bybit_bot.client import BybitClient, BybitError
-from bybit_demo_bot.cli import BybitDemoBot
+from bybit_demo_bot.cli import BybitDemoBot, DemoState
+from bybit_demo_bot.hedge import HedgeReplicaBot
 from reference_bot.config import PAPER_BOT_CONFIG_FILE, PaperBotConfig
 from server_bot.tunnel_runtime import archive_while_running
 from shared.env import load_env, setting
+from shared.hedge_strategy import HEDGE_MODE
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = ROOT / "bybitrealapi.env"
@@ -22,31 +25,24 @@ STATE_FILE = ROOT / "bybit_state.json"
 LOCK_FILE = ROOT / "bybit_bot.instance.lock"
 
 
-@dataclass
-class BybitState:
-    """Represent bybit state."""
-
-    launched_at: str
-    last_processed_candle: str | None = None
-    hedge_state: dict | None = None
-    pending_protection_side: str | None = None
-    pending_take_profit: str | None = None
-    halted_reason: str | None = None
-    consumed_signal_side: str | None = None
-    observed_position_side: str | None = None
+class BybitState(DemoState):
+    """Keep mainnet execution state in its own persistence file."""
 
     @classmethod
-    def load_or_create(cls, resume: bool) -> BybitState:
-        """Load or create."""
+    @override
+    def load_or_create(cls, *, resume: bool) -> BybitState:
+        """Load or create.
+
+        Returns:
+            The load or create result.
+
+        Raises:
+            RuntimeError: If the requested operation cannot safely proceed.
+
+        """
         if resume and STATE_FILE.is_file():
             try:
-                data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-                # Old state cannot tell whether the current signal already traded.
-                if "consumed_signal_side" not in data and data.get(
-                    "last_processed_candle"
-                ):
-                    data["consumed_signal_side"] = "legacy"
-                return cls(**data)
+                return cls.read_state(STATE_FILE)
             except (OSError, TypeError, json.JSONDecodeError) as exc:
                 message = f"Cannot read {STATE_FILE.name}: {exc}"
                 raise RuntimeError(message) from None
@@ -54,6 +50,7 @@ class BybitState:
         state.save()
         return state
 
+    @override
     def save(self) -> None:
         """Save."""
         temporary = STATE_FILE.with_suffix(".json.tmp")
@@ -66,8 +63,8 @@ class BybitState:
 class BybitBot(BybitDemoBot):
     """Run the demo-tested strategy mechanics against Bybit mainnet."""
 
-    EXECUTOR_NAME = "Bybit MAINNET"
-    ACCOUNT_NAME = "Bybit mainnet"
+    EXECUTOR_NAME: ClassVar[str] = "Bybit MAINNET"
+    ACCOUNT_NAME: ClassVar[str] = "Bybit mainnet"
 
 
 def run_bybit_command(
@@ -78,7 +75,13 @@ def run_bybit_command(
     resume: bool = False,
     poll_seconds: int = 10,
 ) -> None:
-    """Run bybit command."""
+    """Run bybit command.
+
+    Raises:
+        RuntimeError: If the requested operation cannot safely proceed.
+        ValueError: If the requested operation cannot safely proceed.
+
+    """
     if not confirm_live:
         message = "Refusing to trade real funds without --confirm-live"
         raise ValueError(message)
@@ -95,16 +98,14 @@ def run_bybit_command(
         except BlockingIOError:
             message = "Another Bybit mainnet bot is running"
             raise RuntimeError(message) from None
-        from bybit_demo_bot.hedge import HedgeReplicaBot
-        from shared.hedge_strategy import HEDGE_MODE
 
         executor = (
             HedgeReplicaBot if config.strategy_mode == HEDGE_MODE else BybitBot
         )
         with archive_while_running():
-            executor(config, client, BybitState.load_or_create(resume)).run(
-                poll_seconds
-            )
+            executor(
+                config, client, BybitState.load_or_create(resume=resume)
+            ).run(poll_seconds)
 
 
 class CommandArguments(argparse.Namespace):
@@ -118,7 +119,12 @@ class CommandArguments(argparse.Namespace):
 
 
 def parse_args() -> CommandArguments:
-    """Parse args."""
+    """Parse args.
+
+    Returns:
+        The parse args result.
+
+    """
     parser = argparse.ArgumentParser(
         description="Trade the strategy using real funds on Bybit mainnet"
     )
@@ -134,7 +140,12 @@ def parse_args() -> CommandArguments:
 
 
 def main() -> None:
-    """Main."""
+    """Dispatch the requested command.
+
+    Raises:
+        SystemExit: If the requested operation cannot safely proceed.
+
+    """
     args = parse_args()
     try:
         run_bybit_command(

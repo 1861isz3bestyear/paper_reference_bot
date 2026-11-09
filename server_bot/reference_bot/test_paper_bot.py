@@ -1,9 +1,13 @@
 # Copyright 2026 anchored-vwam-backtest contributors
 """Tests for reference bot test paper bot."""
 
+import json
+import os
 import tempfile
 from contextlib import redirect_stdout
+from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from io import StringIO
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -27,17 +31,41 @@ from reference_bot.cli import (
 from reference_bot.config import PaperBotConfig
 from reference_bot.trading import LocalPaperTrader
 from shared.models import Trade
+from shared.testing_support import ignoring_arguments
+from tests.mock_support import call_args, call_kwargs, mock_child
+
+TERMINAL_WIDTH = 60
+INITIAL_CANDLE_COUNT = 2
+HISTORY_FETCH_COUNT = 4
 
 
 def config() -> PaperBotConfig:
-    """Config."""
+    """Config.
+
+    Returns:
+        The config result.
+
+    """
     return PaperBotConfig(
-        "VWAP band mean reversion", "5m", True, 1.2, 0.4, 1_000, 2.5, False, 2
+        strategy_mode="VWAP band mean reversion",
+        timeframe="5m",
+        trend=True,
+        open_order_vwap_sigma=1.2,
+        close_order_vwap_sigma=0.4,
+        initial_capital=1_000,
+        stop_loss_pct=2.5,
+        allow_immediate_reentry=False,
+        vwap_anchor_reset_weeks=2,
     )
 
 
 def candles() -> pd.DataFrame:
-    """Candles."""
+    """Candles.
+
+    Returns:
+        The validated candle observations.
+
+    """
     times = pd.to_datetime(["2026-01-01T00:05:00Z", "2026-01-01T00:10:00Z"])
     return pd.DataFrame({
         "time": times,
@@ -54,20 +82,17 @@ def candles() -> pd.DataFrame:
 class TestPaperBot:
     """Represent test paper bot."""
 
-    def test_bot_state_create_and_reload(self, tmp_path: Path) -> None:
+    @staticmethod
+    def test_bot_state_create_and_reload(tmp_path: Path) -> None:
         """Verify bot state create and reload."""
         path = tmp_path / "state.json"
         created = BotState.load_or_create(path)
         loaded = BotState.load_or_create(path)
-        if loaded != created:
-            pytest.fail("Expected loaded == created")
-        if not ((pd.Timestamp(created.launched_at).tzinfo) is not (None)):
-            pytest.fail(
-                "Expected pd.Timestamp(created.launched_at).tzinfo is not None"
-            )
+        assert loaded == created
+        assert pd.Timestamp(created.launched_at).tzinfo is not None
 
     @pytest.mark.parametrize(
-        "changes, message",
+        ("changes", "message"),
         [
             ({"strategy_mode": "bad"}, "Unsupported"),
             ({"timeframe": "2m"}, "timeframe"),
@@ -89,24 +114,25 @@ class TestPaperBot:
             ({"open_position_side": "invalid"}, "Long, Short, or Both"),
         ],
     )
-    def test_config_validation(self, changes, message) -> None:
+    @staticmethod
+    def test_config_validation(
+        changes: dict[str, object], message: str
+    ) -> None:
         """Verify config validation."""
-        values = {**config().__dict__, **changes}
+        values = changes
         with pytest.raises(ValueError, match=message):
-            PaperBotConfig(**values).validate()
+            replace(config(), **values).validate()
 
-    def test_mexc_supports_vet_usdt(self) -> None:
+    @staticmethod
+    def test_mexc_supports_vet_usdt() -> None:
         """Verify mexc supports vet usdt."""
-        settings = PaperBotConfig(**{
-            **config().__dict__,
-            "data_source": "MEXC REST",
-            "ticker": "VET_USDT",
-        })
+        settings = replace(config(), data_source="MEXC REST", ticker="VET_USDT")
 
         settings.validate()
 
+    @staticmethod
     def test_calculate_target_side_uses_offset_and_strategy_launch(
-        self, monkeypatch: pytest.MonkeyPatch
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Verify calculate target side uses offset and strategy launch."""
         indicator = Mock(return_value=candles())
@@ -129,51 +155,27 @@ class TestPaperBot:
         )
         monkeypatch.setattr("reference_bot.cli.backtest", backtest)
         monkeypatch.setattr("reference_bot.cli.latest_strategy_side", latest)
-        settings = PaperBotConfig(**{
-            **config().__dict__,
-            "anchor_before_strategy_start": True,
-            "anchor_before_days": 14,
-            "take_profit_pct": 1.5,
-        })
+        settings = replace(
+            config(),
+            anchor_before_strategy_start=True,
+            anchor_before_days=14,
+            take_profit_pct=1.5,
+        )
         launch = pd.Timestamp("2026-01-15T00:00:00Z")
-        if calculate_target_side(candles(), settings, launch) != "Long":
-            pytest.fail(
-                "Expected calculate_target_side(candles(), settings, launch) =="
-                " 'Long'"
-            )
-        if indicator.call_args.args[1] != pd.Timestamp("2026-01-01T00:00:00Z"):
-            pytest.fail(
-                "Expected indicator.call_args.args[1] =="
-                " pd.Timestamp('2026-01-01T00:00:00Z')"
-            )
-        if backtest.call_args.kwargs["strategy_start_at"] != launch:
-            pytest.fail(
-                "Expected backtest.call_args.kwargs['strategy_start_at'] =="
-                " launch"
-            )
-        if backtest.call_args.kwargs["open_position_side"] != "Both":
-            pytest.fail(
-                "Expected backtest.call_args.kwargs['open_position_side'] =="
-                " 'Both'"
-            )
-        if backtest.call_args.kwargs["minimum_order_size"] != 0.01:
-            pytest.fail(
-                "Expected backtest.call_args.kwargs['minimum_order_size'] =="
-                " 0.01"
-            )
-        if backtest.call_args.kwargs["take_profit_pct"] != 1.5:
-            pytest.fail(
-                "Expected backtest.call_args.kwargs['take_profit_pct'] == 1.5"
-            )
-        if (
-            calculate_target_side(candles().iloc[:1], settings, launch)
-        ) is not (None):
-            pytest.fail(
-                "Expected calculate_target_side(candles().iloc[:1], settings,"
-                " launch) is None"
-            )
+        assert calculate_target_side(candles(), settings, launch) == "Long"
+        assert call_args(indicator)[1] == pd.Timestamp("2026-01-01T00:00:00Z")
+        assert call_kwargs(backtest)["strategy_start_at"] == launch
+        assert call_kwargs(backtest)["open_position_side"] == "Both"
+        assert call_kwargs(backtest)["minimum_order_size"] == pytest.approx(
+            0.01
+        )
+        assert call_kwargs(backtest)["take_profit_pct"] == pytest.approx(1.5)
+        assert (
+            calculate_target_side(candles().iloc[:1], settings, launch) is None
+        )
 
-    def test_stats_use_terminal_friendly_multiline_layout(self) -> None:
+    @staticmethod
+    def test_stats_use_terminal_friendly_multiline_layout() -> None:
         """Verify stats use terminal friendly multiline layout."""
         trade = {
             "side": "Long",
@@ -201,42 +203,34 @@ class TestPaperBot:
             ),
             patch(
                 "reference_bot.cli.shutil.get_terminal_size",
-                return_value=__import__("os").terminal_size((60, 24)),
+                return_value=os.terminal_size((60, 24)),
             ),
             redirect_stdout(output),
         ):
             stats_command()
 
         rendered = output.getvalue()
-        if "Completed trades: 1" not in (rendered):
-            pytest.fail("Expected 'Completed trades: 1' in rendered")
-        if "Trade 1: Long" not in (rendered):
-            pytest.fail("Expected 'Trade 1: Long' in rendered")
-        if "Deposit size: 125.00 USDT" not in (rendered):
-            pytest.fail("Expected 'Deposit size: 125.00 USDT' in rendered")
-        if "Exit reason:" not in (rendered):
-            pytest.fail("Expected 'Exit reason:' in rendered")
-        if not (all(len(line) <= 60 for line in rendered.splitlines())):
-            pytest.fail(
-                "Expected all((len(line) <= 60 for line in"
-                " rendered.splitlines()))"
-            )
+        assert "Completed trades: 1" in rendered
+        assert "Trade 1: Long" in rendered
+        assert "Deposit size: 125.00 USDT" in rendered
+        assert "Exit reason:" in rendered
+        assert all(
+            len(line) <= TERMINAL_WIDTH for line in rendered.splitlines()
+        )
 
     @pytest.mark.parametrize("take_profit_pct", [0.0, 1.5])
-    def test_config_round_trip(self, take_profit_pct: float) -> None:
+    @staticmethod
+    def test_config_round_trip(take_profit_pct: float) -> None:
         """Verify config round trip."""
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
-            settings = PaperBotConfig(
-                **{**config().__dict__, "take_profit_pct": take_profit_pct}
-            )
+            settings = replace(config(), take_profit_pct=take_profit_pct)
             settings.save(path)
 
             loaded = PaperBotConfig.load(path)
 
-        if loaded != settings:
-            pytest.fail("Expected loaded == settings")
-        if set(loaded.__dict__) != {
+        assert loaded == settings
+        assert set(loaded.__dict__) == {
             "strategy_mode",
             "timeframe",
             "trend",
@@ -262,54 +256,45 @@ class TestPaperBot:
             "close_sigma_1",
             "open_sigma_2",
             "close_sigma_2",
-        }:
-            pytest.fail(
-                "Expected set(loaded.__dict__) == {'strategy_mode',"
-                " 'timeframe', 'trend', 'open_order_vwap_sigma',"
-                " 'close_order_vwap_sigma', 'initial_capital', 'stop_loss_pct',"
-                " 'allow_immediate_reentry', 'vwap_anchor_reset_weeks',"
-                " 'anchor_before_strategy_start', 'anchor_before_days',"
-                " 'data_source', 'ticker', 'reverse_ticker',"
-                " 'open_position_side', 'minimum_order_size',"
-                " 'stop_loss_basis', 'hedge_entry_timeout_bars', 'leverage',"
-                " 'slippage_bps', 'take_profit_pct', 'open_sigma_1',"
-                " 'close_sigma_1', 'open_sigma_2', 'close_sigma_2'}"
-            )
+        }
 
-    def test_loads_older_config_without_anchor_offset_fields(self) -> None:
+    @staticmethod
+    def test_loads_older_config_without_anchor_offset_fields() -> None:
         """Verify loads older config without anchor offset fields."""
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             values = config().__dict__.copy()
             values.pop("anchor_before_strategy_start")
             values.pop("anchor_before_days")
-            _ = path.write_text(
-                __import__("json").dumps(values), encoding="utf-8"
-            )
+            _ = path.write_text(json.dumps(values), encoding="utf-8")
 
             loaded = PaperBotConfig.load(path)
 
-        if loaded.anchor_before_strategy_start:
-            pytest.fail("Expected not loaded.anchor_before_strategy_start")
-        if loaded.anchor_before_days != 0:
-            pytest.fail("Expected loaded.anchor_before_days == 0")
+        assert not loaded.anchor_before_strategy_start
+        assert loaded.anchor_before_days == 0
 
+    @staticmethod
     def test_loads_older_config_without_minimum_order_size(
-        self, tmp_path: Path
+        tmp_path: Path,
     ) -> None:
         """Verify loads older config without minimum order size."""
         path = tmp_path / "config.json"
         values = config().__dict__.copy()
         values.pop("minimum_order_size")
-        _ = path.write_text(__import__("json").dumps(values), encoding="utf-8")
+        _ = path.write_text(json.dumps(values), encoding="utf-8")
 
         loaded = PaperBotConfig.load(path)
 
-        if loaded.minimum_order_size != 0.01:
-            pytest.fail("Expected loaded.minimum_order_size == 0.01")
+        assert loaded.minimum_order_size == pytest.approx(0.01)
 
-    def make_bot(self, directory: str) -> PaperBot:
-        """Make bot."""
+    @staticmethod
+    def make_bot(directory: str) -> PaperBot:
+        """Make bot.
+
+        Returns:
+            The make bot result.
+
+        """
         root = Path(directory)
         config_path = root / "config.json"
         config().save(config_path)
@@ -321,13 +306,11 @@ class TestPaperBot:
 
     def test_retries_do_not_duplicate_processed_signal(self) -> None:
         """Verify retries do not duplicate processed signal."""
-        from decimal import Decimal
-
         with tempfile.TemporaryDirectory() as directory:
             bot = self.make_bot(directory)
             with (
                 patch.object(
-                    bot, "_load_completed_candles", return_value=candles()
+                    bot, "load_completed_candles", return_value=candles()
                 ),
                 patch(
                     "reference_bot.cli.calculate_strategy_decision",
@@ -346,32 +329,26 @@ class TestPaperBot:
                     return_value=Decimal("0.00055"),
                 ),
             ):
-                if bot.process_available_candles() != 2:
-                    pytest.fail("Expected bot.process_available_candles() == 2")
+                assert bot.process_available_candles() == INITIAL_CANDLE_COUNT
 
             first_entry = bot.trader.current_position("BTCUSDT")
             bot.state.last_processed_candle = "2026-01-01T00:05:00+00:00"
             bot.state.save(bot.state_path)
             with (
                 patch.object(
-                    bot, "_load_completed_candles", return_value=candles()
+                    bot, "load_completed_candles", return_value=candles()
                 ),
                 patch(
                     "reference_bot.cli.calculate_strategy_decision",
                     return_value=StrategyDecision("Long", None),
                 ),
             ):
-                if bot.process_available_candles() != 1:
-                    pytest.fail("Expected bot.process_available_candles() == 1")
+                assert bot.process_available_candles() == 1
 
             repeated = bot.trader.current_position("BTCUSDT")
 
-        if repeated.updated_at != first_entry.updated_at:
-            pytest.fail(
-                "Expected repeated.updated_at == first_entry.updated_at"
-            )
-        if repeated.quantity != first_entry.quantity:
-            pytest.fail("Expected repeated.quantity == first_entry.quantity")
+        assert repeated.updated_at == first_entry.updated_at
+        assert repeated.quantity == first_entry.quantity
 
     def test_network_failure_does_not_advance_candle_cursor(self) -> None:
         """Verify network failure does not advance candle cursor."""
@@ -380,7 +357,7 @@ class TestPaperBot:
             one_candle = candles().iloc[:1]
             with (
                 patch.object(
-                    bot, "_load_completed_candles", return_value=one_candle
+                    bot, "load_completed_candles", return_value=one_candle
                 ),
                 patch(
                     "reference_bot.cli.calculate_strategy_decision",
@@ -396,15 +373,12 @@ class TestPaperBot:
 
             persisted = BotState.load_or_create(bot.state_path)
 
-        if (persisted.last_processed_candle) is not (None):
-            pytest.fail("Expected persisted.last_processed_candle is None")
+        assert persisted.last_processed_candle is None
 
     def test_catch_up_replays_historical_fills_and_times_without_live_price(
         self,
     ) -> None:
-        """Verify catch up replays historical fills and times without live price."""
-        from decimal import Decimal
-
+        """Replay historical fills using candle prices and timestamps."""
         with tempfile.TemporaryDirectory() as directory:
             bot = self.make_bot(directory)
             backlog = pd.concat(
@@ -421,12 +395,12 @@ class TestPaperBot:
             decisions = [
                 StrategyDecision(None, None),
                 StrategyDecision("Long", 95.0),
-                StrategyDecision(None, 105.0, "Reached -0.4σ exit band"),
+                StrategyDecision(None, 105.0, "Reached -0.4\u03c3 exit band"),
                 StrategyDecision(None, None),
             ]
             with (
                 patch.object(
-                    bot, "_load_completed_candles", return_value=backlog
+                    bot, "load_completed_candles", return_value=backlog
                 ),
                 patch(
                     "reference_bot.cli.calculate_strategy_decision",
@@ -442,62 +416,43 @@ class TestPaperBot:
                     return_value=Decimal("0.00055"),
                 ),
             ):
-                if bot.process_available_candles() != 4:
-                    pytest.fail("Expected bot.process_available_candles() == 4")
+                assert bot.process_available_candles() == HISTORY_FETCH_COUNT
 
             history = bot.trader.trade_history("BTCUSDT")
             live_price.assert_not_called()
-            if history[0]["entry_price"] != 95.0:
-                pytest.fail("Expected history[0]['entry_price'] == 95.0")
-            if history[0]["exit_price"] != 105.0:
-                pytest.fail("Expected history[0]['exit_price'] == 105.0")
-            if history[0]["entry_time"] != "2026-01-01T00:10:00+00:00":
-                pytest.fail(
-                    "Expected history[0]['entry_time'] =="
-                    " '2026-01-01T00:10:00+00:00'"
-                )
-            if history[0]["exit_time"] != "2026-01-01T00:15:00+00:00":
-                pytest.fail(
-                    "Expected history[0]['exit_time'] =="
-                    " '2026-01-01T00:15:00+00:00'"
-                )
-            if history[0]["exit_reason"] != "Reached -0.4σ exit band":
-                pytest.fail(
-                    "Expected history[0]['exit_reason'] == 'Reached -0.4σ exit"
-                    " band'"
-                )
+            assert history[0]["entry_price"] == pytest.approx(95.0)
+            assert history[0]["exit_price"] == pytest.approx(105.0)
+            assert history[0]["entry_time"] == "2026-01-01T00:10:00+00:00"
+            assert history[0]["exit_time"] == "2026-01-01T00:15:00+00:00"
+            assert history[0]["exit_reason"] == "Reached -0.4\u03c3 exit band"
             with (
                 patch.object(
-                    bot, "_load_completed_candles", return_value=backlog
+                    bot, "load_completed_candles", return_value=backlog
                 ),
                 patch(
                     "reference_bot.cli.calculate_strategy_decision"
                 ) as decision,
             ):
-                if bot.process_available_candles() != 0:
-                    pytest.fail("Expected bot.process_available_candles() == 0")
+                assert bot.process_available_candles() == 0
                 decision.assert_not_called()
 
-            if len(bot.trader.trade_history("BTCUSDT")) != 1:
-                pytest.fail(
-                    "Expected len(bot.trader.trade_history('BTCUSDT')) == 1"
-                )
+            assert len(bot.trader.trade_history("BTCUSDT")) == 1
 
     def test_reversal_sizes_new_position_from_post_close_capital(self) -> None:
         """Verify reversal sizes new position from post close capital."""
-        from decimal import Decimal
-
         with tempfile.TemporaryDirectory() as directory:
             bot = self.make_bot(directory)
             fee_rate = Decimal("0.001")
             opening = bot.trader.build_target(
-                "BTCUSDT", "Long", 100, bot.config.initial_capital
+                "BTCUSDT", "Long", 100, notional=bot.config.initial_capital
             )
-            _ = bot.trader.reconcile("BTCUSDT", opening, fee_rate)
+            _ = bot.trader.reconcile(
+                "BTCUSDT", opening, taker_fee_rate=fee_rate
+            )
             one_candle = candles().iloc[:1]
             with (
                 patch.object(
-                    bot, "_load_completed_candles", return_value=one_candle
+                    bot, "load_completed_candles", return_value=one_candle
                 ),
                 patch(
                     "reference_bot.cli.calculate_strategy_decision",
@@ -517,22 +472,20 @@ class TestPaperBot:
 
             position = bot.trader.current_position("BTCUSDT")
 
-        if position.side != "Short":
-            pytest.fail("Expected position.side == 'Short'")
-        if position.quantity != Decimal("9.980"):
-            pytest.fail("Expected position.quantity == Decimal('9.980')")
+        assert position.side == "Short"
+        assert position.quantity == Decimal("9.980")
 
     def test_anchor_offset_loads_historical_candles_but_does_not_process_them(
         self,
     ) -> None:
-        """Verify anchor offset loads historical candles but does not process them."""
+        """Load anchor history without processing it as strategy candles."""
         with tempfile.TemporaryDirectory() as directory:
             bot = self.make_bot(directory)
-            bot.config = PaperBotConfig(**{
-                **bot.config.__dict__,
-                "anchor_before_strategy_start": True,
-                "anchor_before_days": 14,
-            })
+            bot.config = replace(
+                bot.config,
+                anchor_before_strategy_start=True,
+                anchor_before_days=14,
+            )
             times = pd.date_range(
                 "2025-12-18T00:00:00Z", "2026-01-01T00:05:00Z", freq="5min"
             )
@@ -552,31 +505,26 @@ class TestPaperBot:
                     return_value=history,
                 ) as fetch,
             ):
-                loaded = bot._load_completed_candles(
+                loaded = bot.load_completed_candles(
                     pd.Timestamp("2025-12-18T00:00:00Z"),
                     datetime(2026, 1, 1, 0, 11, tzinfo=UTC),
                 )
 
-        if fetch.call_args.args[2] != int(
+        assert call_kwargs(fetch)["start_ms"] == int(
             pd.Timestamp("2025-12-18T00:00:00Z").timestamp() * 1000
-        ):
-            pytest.fail(
-                "Expected fetch.call_args.args[2] =="
-                " int(pd.Timestamp('2025-12-18T00:00:00Z').timestamp() * 1000)"
-            )
-        if len(loaded) != len(history):
-            pytest.fail("Expected len(loaded) == len(history)")
+        )
+        assert len(loaded) == len(history)
 
     def test_stop_loss_uses_actual_local_fill_and_is_recorded(self) -> None:
         """Verify stop loss uses actual local fill and is recorded."""
-        from decimal import Decimal
-
         with tempfile.TemporaryDirectory() as directory:
             bot = self.make_bot(directory)
             opening = bot.trader.build_target(
-                "BTCUSDT", "Long", 102, bot.config.initial_capital
+                "BTCUSDT", "Long", 102, notional=bot.config.initial_capital
             )
-            _ = bot.trader.reconcile("BTCUSDT", opening, Decimal("0.00055"))
+            _ = bot.trader.reconcile(
+                "BTCUSDT", opening, taker_fee_rate=Decimal("0.00055")
+            )
             stopped_candle = candles().iloc[:1].copy()
             stopped_candle.loc[stopped_candle.index[0], "time"] = (
                 pd.Timestamp.now(tz="UTC") + pd.Timedelta(minutes=1)
@@ -584,7 +532,7 @@ class TestPaperBot:
             stopped_candle.loc[stopped_candle.index[0], "low"] = 90
             with (
                 patch.object(
-                    bot, "_load_completed_candles", return_value=stopped_candle
+                    bot, "load_completed_candles", return_value=stopped_candle
                 ),
                 patch(
                     "reference_bot.cli.calculate_strategy_decision",
@@ -604,45 +552,38 @@ class TestPaperBot:
 
             history = bot.trader.trade_history("BTCUSDT")
 
-        if history[0]["exit_reason"] != "Stop loss":
-            pytest.fail("Expected history[0]['exit_reason'] == 'Stop loss'")
+        assert history[0]["exit_reason"] == "Stop loss"
 
     def test_empty_and_prelaunch_candles_are_not_processed(self) -> None:
         """Verify empty and prelaunch candles are not processed."""
         with tempfile.TemporaryDirectory() as directory:
             bot = self.make_bot(directory)
             with patch.object(
-                bot, "_load_completed_candles", return_value=pd.DataFrame()
+                bot, "load_completed_candles", return_value=pd.DataFrame()
             ):
-                if bot.process_available_candles() != 0:
-                    pytest.fail("Expected bot.process_available_candles() == 0")
+                assert bot.process_available_candles() == 0
             old = candles().copy()
             old["time"] = pd.to_datetime(
                 ["2025-12-31T23:50:00Z", "2025-12-31T23:55:00Z"]
             )
-            with patch.object(bot, "_load_completed_candles", return_value=old):
-                if bot.process_available_candles() != 0:
-                    pytest.fail("Expected bot.process_available_candles() == 0")
+            with patch.object(bot, "load_completed_candles", return_value=old):
+                assert bot.process_available_candles() == 0
 
     def test_run_forever_starts_and_stops_websocket(self) -> None:
         """Verify run forever starts and stops websocket."""
         with tempfile.TemporaryDirectory() as directory:
             bot = self.make_bot(directory)
             bot.market_feed = Mock()
-            bot.process_available_candles = Mock(side_effect=lambda: bot.stop())
+            bot.process_available_candles = Mock(side_effect=bot.stop)
             output = StringIO()
             with (
                 patch("reference_bot.cli.signal.signal"),
                 redirect_stdout(output),
             ):
                 bot.run_forever()
-            bot.market_feed.start.assert_called_once()
-            bot.market_feed.stop.assert_called_once()
-            if "initial capital=1000.00 USDT" not in (output.getvalue()):
-                pytest.fail(
-                    "Expected 'initial capital=1000.00 USDT' in"
-                    " output.getvalue()"
-                )
+            mock_child(bot.market_feed, "start").assert_called_once()
+            mock_child(bot.market_feed, "stop").assert_called_once()
+            assert "initial capital=1000.00 USDT" in output.getvalue()
 
 
 def test_status_stats_and_pid_helpers(
@@ -661,35 +602,28 @@ def test_status_stats_and_pid_helpers(
     )
     monkeypatch.setattr(
         "reference_bot.cli._configured_market",
-        lambda *_: ("BTCUSDT", "BTC", "USDT"),
+        ignoring_arguments(lambda: ("BTCUSDT", "BTC", "USDT")),
     )
     status_command()
     status_output = capsys.readouterr().out
-    if "Paper bot: stopped" not in (status_output):
-        pytest.fail("Expected 'Paper bot: stopped' in status_output")
-    if "Deposit size: 0.00 USDT" not in (status_output):
-        pytest.fail("Expected 'Deposit size: 0.00 USDT' in status_output")
+    assert "Paper bot: stopped" in status_output
+    assert "Deposit size: 0.00 USDT" in status_output
 
     monkeypatch.setattr(
         "reference_bot.cli.LocalPaperTrader.trade_history",
         Mock(return_value=[]),
     )
     stats_command()
-    if "No completed" not in (capsys.readouterr().out):
-        pytest.fail("Expected 'No completed' in capsys.readouterr().out")
+    assert "No completed" in capsys.readouterr().out
 
     pid_file = tmp_path / "pid"
     monkeypatch.setattr("reference_bot.cli.PID_FILE", pid_file)
-    if (read_pid()) is not (None):
-        pytest.fail("Expected read_pid() is None")
+    assert read_pid() is None
     _ = pid_file.write_text("invalid")
-    if (read_pid()) is not (None):
-        pytest.fail("Expected read_pid() is None")
-    if (process_is_running(999_999_999)) is not (False):
-        pytest.fail("Expected process_is_running(999999999) is False")
+    assert read_pid() is None
+    assert process_is_running(999999999) is False
     stop_command()
-    if "not running" not in (capsys.readouterr().out):
-        pytest.fail("Expected 'not running' in capsys.readouterr().out")
+    assert "not running" in capsys.readouterr().out
 
 
 def test_reset_command_deletes_previous_data_but_keeps_config(
@@ -723,25 +657,14 @@ def test_reset_command_deletes_previous_data_but_keeps_config(
 
     reset_command()
 
-    if not (config_path.is_file()):
-        pytest.fail("Expected config_path.is_file()")
-    if account.exists():
-        pytest.fail("Expected not account.exists()")
-    if account.with_suffix(".json.lock").exists():
-        pytest.fail("Expected not account.with_suffix('.json.lock').exists()")
-    if state.exists():
-        pytest.fail("Expected not state.exists()")
-    if candles.exists():
-        pytest.fail("Expected not candles.exists()")
-    if Path(f"{candles}-wal").exists():
-        pytest.fail("Expected not Path(f'{candles}-wal').exists()")
-    if pid.exists():
-        pytest.fail("Expected not pid.exists()")
-    if "Deleted previous paper bot data" not in (capsys.readouterr().out):
-        pytest.fail(
-            "Expected 'Deleted previous paper bot data' in"
-            " capsys.readouterr().out"
-        )
+    assert config_path.is_file()
+    assert not account.exists()
+    assert not account.with_suffix(".json.lock").exists()
+    assert not state.exists()
+    assert not candles.exists()
+    assert not Path(f"{candles}-wal").exists()
+    assert not pid.exists()
+    assert "Deleted previous paper bot data" in capsys.readouterr().out
 
 
 def test_reset_command_refuses_while_bot_is_running(
@@ -749,7 +672,9 @@ def test_reset_command_refuses_while_bot_is_running(
 ) -> None:
     """Verify reset command refuses while bot is running."""
     monkeypatch.setattr("reference_bot.cli.read_pid", lambda: 123)
-    monkeypatch.setattr("reference_bot.cli.process_is_running", lambda _: True)
+    monkeypatch.setattr(
+        "reference_bot.cli.process_is_running", ignoring_arguments(lambda: True)
+    )
 
     with pytest.raises(RuntimeError, match="Stop the paper bot"):
         reset_command()

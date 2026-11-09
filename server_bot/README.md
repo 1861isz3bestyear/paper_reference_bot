@@ -342,15 +342,20 @@ uv run python -m server_bot.tunnel_archive --once
 ```
 
 It records BTC (or `--asset ETH`) Deribit option instruments, option summaries
-and index price; Bybit top-50 linear depth, recent minute/hour candles, hourly
-open interest, and USDT margin-rate history. Set `BYBIT_API_KEY` and
+and index price; Bybit top-50 linear depth, native one-minute OHLCV candles,
+current ticker price and open interest, hourly candle/open-interest warmup
+history, and USDT margin-rate history. Set `BYBIT_API_KEY` and
 `BYBIT_API_SECRET` with margin read access for the authenticated rate endpoint.
 The collector never submits orders. The default polling interval is 60 seconds;
 use `--poll-seconds` to change it.
 
 SQLite `tunnel_inputs` retains each raw JSON response, source, asset, request
 time, receipt/availability time and error type, including repeated observations
-across restarts. Each source commits independently, so unavailable margin data
+across restarts. New rows also have a `collection_id` and UTC `minute_at`
+label so all sources in a pass can be joined without mixing separate polls.
+Existing rows are preserved with null collection/minute labels. The minute
+label is the collection start minute; actual receipt times determine when
+data can be used. Each source commits independently, so unavailable margin data
 cannot discard options or depth. Failed HTTP responses retain their bodies.
 Credentials and request headers are not stored.
 
@@ -372,3 +377,14 @@ bot; another running bot continues polling. Archive errors are logged without
 interrupting trading. The archive survives bot resets. Margin credentials must
 be present in the process environment; executor-specific env files are not
 implicitly reused for the mainnet margin endpoint.
+
+Automatic collection begins immediately and subsequent polls target UTC minute
+boundaries, without adding a full minute after each request cycle. Native price
+candles retain their exchange timestamps and OHLCV values. Open interest, depth,
+margin rates and option chains are minute observations, not synthetic OHLC
+candles; their native update frequency may be slower. Keep hourly history for
+indicator warmup. GEX replay uses instrument expiry/strike/type/contract size,
+option IV and open interest, and index price from the raw option responses.
+A missing source remains an explicit error, not a carried-forward value.
+Exchange outages or collection passes taking over a minute can leave gaps;
+historical option chains and order books cannot be backfilled by this collector.

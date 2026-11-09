@@ -6,7 +6,6 @@ from __future__ import annotations
 import fcntl
 import threading
 from contextlib import contextmanager
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,6 +16,7 @@ from server_bot import tunnel_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+    from pathlib import Path
 
     import requests
 
@@ -28,7 +28,12 @@ def test_shared_poll_is_throttled_and_lock_is_respected(
     calls: list[Path] = []
 
     def collect(path: Path, _session: requests.Session) -> int:
-        """Collect."""
+        """Collect.
+
+        Returns:
+            The collect result.
+
+        """
         calls.append(path)
         return 0
 
@@ -37,16 +42,13 @@ def test_shared_poll_is_throttled_and_lock_is_respected(
     with path.with_suffix(".lock").open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         tunnel_runtime.poll_archive(path)
-    if calls != []:
-        pytest.fail("Expected calls == []")
+    assert calls == []
     tunnel_runtime.poll_archive(path)
     tunnel_runtime.poll_archive(path)
-    if calls != [path]:
-        pytest.fail("Expected calls == [path]")
+    assert calls == [path]
     _ = path.with_suffix(".lock").write_text("0", encoding="utf-8")
     tunnel_runtime.poll_archive(path)
-    if calls != [path, path]:
-        pytest.fail("Expected calls == [path, path]")
+    assert calls == [path, path]
 
 
 def test_worker_starts_immediately_and_stops_on_exit(
@@ -63,12 +65,9 @@ def test_worker_starts_immediately_and_stops_on_exit(
 
     monkeypatch.setattr(tunnel_runtime, "poll_archive", poll)
     with tunnel_runtime.archive_while_running():
-        if not (polled.wait(timeout=2)):
-            pytest.fail("Expected polled.wait(timeout=2)")
-    if len(workers) != 1:
-        pytest.fail("Expected len(workers) == 1")
-    if workers[0].is_alive():
-        pytest.fail("Expected not workers[0].is_alive()")
+        assert polled.wait(timeout=2)
+    assert len(workers) == 1
+    assert not workers[0].is_alive()
 
 
 @pytest.mark.parametrize("package", ["reference_bot", "live_paper_bot"])
@@ -95,8 +94,14 @@ def test_bot_run_owns_archive_lifecycle(
             """Initialize the test fixture."""
             events.append("bot-created")
 
-        def run_forever(self) -> None:
-            """Run forever."""
+        @staticmethod
+        def run_forever() -> None:
+            """Run forever.
+
+            Raises:
+                RuntimeError: If the requested operation cannot safely proceed.
+
+            """
             events.append("bot-run")
             message = "bot stopped"
             raise RuntimeError(message)
@@ -107,13 +112,8 @@ def test_bot_run_owns_archive_lifecycle(
     monkeypatch.setattr(cli, "archive_while_running", archive)
     with pytest.raises(RuntimeError, match="bot stopped"):
         cli.run_command(tmp_path / "config.json", resume=True)
-    if events != ["bot-created", "archive-start", "bot-run", "archive-stop"]:
-        pytest.fail(
-            "Expected events == ['bot-created', 'archive-start', 'bot-run',"
-            " 'archive-stop']"
-        )
-    if (tmp_path / "PID_FILE").exists():
-        pytest.fail("Expected not (tmp_path / 'PID_FILE').exists()")
+    assert events == ["bot-created", "archive-start", "bot-run", "archive-stop"]
+    assert not (tmp_path / "PID_FILE").exists()
 
 
 def test_corrupt_poll_timestamp_is_repaired(
@@ -126,7 +126,12 @@ def test_corrupt_poll_timestamp_is_repaired(
     collected: list[Path] = []
 
     def collect(output: Path, _session: requests.Session) -> int:
-        """Collect."""
+        """Collect.
+
+        Returns:
+            The collect result.
+
+        """
         collected.append(output)
         return 0
 
@@ -134,9 +139,33 @@ def test_corrupt_poll_timestamp_is_repaired(
     monkeypatch.setattr(tunnel_runtime, "time", lambda: 1000.0)
     tunnel_runtime.poll_archive(path)
     tunnel_runtime.poll_archive(path)
-    if collected != [path]:
-        pytest.fail("Expected collected == [path]")
-    if float(lock.read_text(encoding="utf-8")) != 1000.0:
-        pytest.fail(
-            "Expected float(lock.read_text(encoding='utf-8')) == 1000.0"
-        )
+    assert collected == [path]
+    assert float(lock.read_text(encoding="utf-8")) == pytest.approx(1000.0)
+
+
+def test_next_minute_is_polled_without_waiting_after_slow_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Request latency must not add another full minute to the cadence."""
+    path = tmp_path / "archive.sqlite"
+    clock = [120.0]
+    calls: list[float] = []
+
+    def collect(_path: Path, _session: requests.Session) -> int:
+        """Simulate a slow poll.
+
+        Returns:
+            Zero failed sources.
+
+        """
+        calls.append(clock[0])
+        clock[0] += 45
+        return 0
+
+    monkeypatch.setattr(tunnel_runtime, "time", lambda: clock[0])
+    monkeypatch.setattr(tunnel_runtime, "collect", collect)
+    tunnel_runtime.poll_archive(path)
+    tunnel_runtime.poll_archive(path)
+    clock[0] = 180
+    tunnel_runtime.poll_archive(path)
+    assert calls == [120.0, 180]
