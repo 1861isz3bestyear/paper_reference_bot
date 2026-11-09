@@ -29,7 +29,7 @@ MAXIMUM_PERCENT = 100
 if TYPE_CHECKING:
     from datetime import date
 
-    from shared.paper_config import PaperBotConfig
+    from shared.strategy_config import StrategyConfig
 
 
 class HedgeState(Protocol):
@@ -544,7 +544,7 @@ def hedge_backtest(
 def process_hedge_history(
     state: HedgeState,
     candles: pd.DataFrame,
-    config: PaperBotConfig,
+    config: StrategyConfig,
     *,
     launched_at: pd.Timestamp,
     fee_pct: float,

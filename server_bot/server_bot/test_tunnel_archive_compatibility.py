@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
-import subprocess
 import sys
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
@@ -68,7 +68,12 @@ def test_archive_matches_calculator_inputs(
     responses = iter(sources(asset))
 
     def get(*_args: object, **_kwargs: object) -> requests.Response:
-        """Get."""
+        """Get.
+
+        Returns:
+            The get result.
+
+        """
         source = next(responses)
         response = requests.Response()
         response.status_code = 200
@@ -79,8 +84,7 @@ def test_archive_matches_calculator_inputs(
 
     monkeypatch.setattr(session, "get", get)
     path = tmp_path / "archive.sqlite"
-    if collect(path, session, asset=asset) != 1:
-        pytest.fail("Expected collect(path, session, asset=asset) == 1")
+    assert collect(path, session, asset=asset) == 1
     # Separate process prevents imports from the server's shared package from
     # masking incompatibilities with the calculator's installed source tree.
     script = """
@@ -95,10 +99,12 @@ from gui_calculator.options_depth import parse_depth
 from shared.validation import json_object
 with closing(sqlite3.connect(sys.argv[2])) as db:
     rows = {r[0]: r[1:] for r in db.execute(
-        "SELECT source, payload, available_at FROM tunnel_inputs WHERE error = ''"
+        "SELECT source, payload, available_at FROM tunnel_inputs "
+        "WHERE error = ''"
     )}
 chain = normalize_chain(json_object(rows['instruments'][0])['result'],
-                        json_object(rows['options'][0])['result'], asset=sys.argv[3])
+                        json_object(rows['options'][0])['result'],
+                        asset=sys.argv[3])
 assert len(chain) == 1
 assert chain[0].iv == 0.5
 assert chain[0].open_interest == 20
@@ -111,17 +117,26 @@ assert book.asks[1].quantity == 5
 assert book.available == datetime.fromisoformat(rows['depth'][1])
 assert json_object(rows['spot'][0])['result']['index_price'] == 100000
 """
-    result = subprocess.run(
-        [sys.executable, "-c", script, str(calculator), str(path), asset],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        pytest.fail(result.stderr)
+    asyncio.run(check_calculator(script, calculator, path, asset=asset))
     with closing(sqlite3.connect(path)) as db:
-        if db.execute("SELECT COUNT(*) FROM tunnel_inputs").fetchone() != (9,):
-            pytest.fail(
-                "Expected db.execute('SELECT COUNT(*) FROM"
-                " tunnel_inputs').fetchone() == (9,)"
-            )
+        assert db.execute("SELECT COUNT(*) FROM tunnel_inputs").fetchone() == (
+            9,
+        )
+
+
+async def check_calculator(
+    script: str, calculator: Path, archive: Path, *, asset: str
+) -> None:
+    """Run the calculator parser in an isolated interpreter."""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        script,
+        str(calculator),
+        str(archive),
+        asset,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    output, error = await process.communicate()
+    assert await process.wait() == 0, (output.decode(), error.decode())

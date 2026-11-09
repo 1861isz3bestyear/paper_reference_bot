@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from typing import TYPE_CHECKING, cast
 from unittest.mock import Mock
 
@@ -45,20 +46,12 @@ def test_credential_file_and_environment(
     monkeypatch.setattr(trading, "BYBIT_ENV_FILES", (path,))
     monkeypatch.setenv("BYBIT_API_KEY", "env-key")
     monkeypatch.setenv("BYBIT_API_SECRET", "env-secret")
-    if trading.load_bybit_credentials() != ("env-key", "env-secret"):
-        pytest.fail(
-            "Expected trading.load_bybit_credentials() == ('env-key',"
-            " 'env-secret')"
-        )
+    assert trading.load_bybit_credentials() == ("env-key", "env-secret")
     _ = path.write_text(
         "# comment\nignored\n\nBYBIT_API_KEY='file-key'\n"
         'BYBIT_API_SECRET="file-secret"\n'
     )
-    if trading.load_bybit_credentials() != ("file-key", "file-secret"):
-        pytest.fail(
-            "Expected trading.load_bybit_credentials() == ('file-key',"
-            " 'file-secret')"
-        )
+    assert trading.load_bybit_credentials() == ("file-key", "file-secret")
 
 
 @pytest.mark.parametrize(
@@ -124,8 +117,7 @@ def test_corrupt_account_root(
     trader = trading.LocalPaperTrader(path)
     with pytest.raises(RuntimeError, match=r"Could not read"):
         _ = trader.current_position("BTCUSDT")
-    if path.read_text() != content:
-        pytest.fail("Expected path.read_text() == content")
+    assert path.read_text() == content
 
 
 def test_corrupt_position_and_history(*, live: bool, tmp_path: Path) -> None:
@@ -133,11 +125,7 @@ def test_corrupt_position_and_history(*, live: bool, tmp_path: Path) -> None:
     trading = live_module if live else reference_module
     path = tmp_path / "account.json"
     trader = trading.LocalPaperTrader(path)
-    if trader.current_position("BTCUSDT").unrealized_pnl(100) != 0:
-        pytest.fail(
-            "Expected trader.current_position('BTCUSDT').unrealized_pnl(100)"
-            " == 0"
-        )
+    assert trader.current_position("BTCUSDT").unrealized_pnl(100) == 0
     _ = path.write_text(
         json.dumps({"positions": {"BTCUSDT": {"side": "Long"}}})
     )
@@ -169,7 +157,7 @@ def test_invalid_target(
     trading = live_module if live else reference_module
     with pytest.raises(ValueError, match=r"side|positive|too small"):
         _ = trading.LocalPaperTrader(tmp_path / "account.json").build_target(
-            "BTCUSDT", side, price, notional
+            "BTCUSDT", side, price, notional=notional
         )
 
 
@@ -185,11 +173,30 @@ def test_invalid_exchange_limits(
     *, live: bool, tmp_path: Path, field: str, value: Decimal
 ) -> None:
     """Refuse malformed quantity grids and negative minimum notional."""
-    trading = live_module if live else reference_module
-    with pytest.raises(ValueError, match=r"limits"):
-        _ = trading.LocalPaperTrader(tmp_path / "account.json").build_target(
-            "BTCUSDT", "Long", 100, 100, **{field: value}
+    if live:
+        build_target = partial(
+            live_module.LocalPaperTrader(
+                tmp_path / "account.json"
+            ).build_target,
+            "BTCUSDT",
+            "Long",
+            100,
+            notional=100,
+            limits=live_module.OrderLimits(**{field: value}),
         )
+    else:
+        build_target = partial(
+            reference_module.LocalPaperTrader(
+                tmp_path / "account.json"
+            ).build_target,
+            "BTCUSDT",
+            "Long",
+            100,
+            notional=100,
+            limits=reference_module.OrderLimits(**{field: value}),
+        )
+    with pytest.raises(ValueError, match=r"limits"):
+        _ = build_target()
 
 
 def test_account_validation_before_mutation(*, tmp_path: Path) -> None:
@@ -204,20 +211,21 @@ def test_account_validation_before_mutation(*, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match=r"fee"):
         _ = trader.reconcile(
             "BTCUSDT",
-            trader.build_target("BTCUSDT", "Long", 100, 100),
-            Decimal(-1),
+            trader.build_target("BTCUSDT", "Long", 100, notional=100),
+            taker_fee_rate=Decimal(-1),
         )
     with pytest.raises(ValueError, match=r"timezone"):
         _ = trader.reconcile(
             "BTCUSDT",
-            trader.build_target("BTCUSDT", "Long", 100, 100),
-            Decimal(0),
+            trader.build_target("BTCUSDT", "Long", 100, notional=100),
+            taker_fee_rate=Decimal(0),
             executed_at=datetime(2026, 1, 1, tzinfo=UTC).replace(tzinfo=None),
         )
-    if path.exists():
-        pytest.fail("Expected not path.exists()")
+    assert not path.exists()
     _ = trader.reconcile(
-        "BTCUSDT", trader.build_target("BTCUSDT", "Long", 100, 100), Decimal(0)
+        "BTCUSDT",
+        trader.build_target("BTCUSDT", "Long", 100, notional=100),
+        taker_fee_rate=Decimal(0),
     )
     with pytest.raises(ValueError, match=r"Closing price"):
         _ = trader.available_capital("BTCUSDT", 100, closing_price=0)
@@ -231,7 +239,9 @@ def test_account_write_failure(
     path = tmp_path / "account.json"
     trader = trading.LocalPaperTrader(path)
     _ = trader.reconcile(
-        "BTCUSDT", trader.build_target("BTCUSDT", "Long", 100, 100), Decimal(0)
+        "BTCUSDT",
+        trader.build_target("BTCUSDT", "Long", 100, notional=100),
+        taker_fee_rate=Decimal(0),
     )
     original = path.read_bytes()
     monkeypatch.setattr(
@@ -239,8 +249,7 @@ def test_account_write_failure(
     )
     with pytest.raises(RuntimeError, match=r"Could not write"):
         _ = trader.reset_strategy_start(datetime.now().astimezone())
-    if path.read_bytes() != original:
-        pytest.fail("Expected path.read_bytes() == original")
+    assert path.read_bytes() == original
 
 
 def test_account_write_failure_live(
@@ -251,7 +260,9 @@ def test_account_write_failure_live(
     path = tmp_path / "account.json"
     trader = trading.LocalPaperTrader(path)
     _ = trader.reconcile(
-        "BTCUSDT", trader.build_target("BTCUSDT", "Long", 100, 100), Decimal(0)
+        "BTCUSDT",
+        trader.build_target("BTCUSDT", "Long", 100, notional=100),
+        taker_fee_rate=Decimal(0),
     )
     original = path.read_bytes()
     monkeypatch.setattr(
@@ -259,8 +270,7 @@ def test_account_write_failure_live(
     )
     with pytest.raises(RuntimeError, match=r"Could not write"):
         _ = trader.reset_strategy_start(datetime.now().astimezone())
-    if path.read_bytes() != original:
-        pytest.fail("Expected path.read_bytes() == original")
+    assert path.read_bytes() == original
 
 
 def test_account_validation_before_mutation_live(*, tmp_path: Path) -> None:
@@ -275,20 +285,21 @@ def test_account_validation_before_mutation_live(*, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match=r"fee"):
         _ = trader.reconcile(
             "BTCUSDT",
-            trader.build_target("BTCUSDT", "Long", 100, 100),
-            Decimal(-1),
+            trader.build_target("BTCUSDT", "Long", 100, notional=100),
+            taker_fee_rate=Decimal(-1),
         )
     with pytest.raises(ValueError, match=r"timezone"):
         _ = trader.reconcile(
             "BTCUSDT",
-            trader.build_target("BTCUSDT", "Long", 100, 100),
-            Decimal(0),
+            trader.build_target("BTCUSDT", "Long", 100, notional=100),
+            taker_fee_rate=Decimal(0),
             executed_at=datetime(2026, 1, 1, tzinfo=UTC).replace(tzinfo=None),
         )
-    if path.exists():
-        pytest.fail("Expected not path.exists()")
+    assert not path.exists()
     _ = trader.reconcile(
-        "BTCUSDT", trader.build_target("BTCUSDT", "Long", 100, 100), Decimal(0)
+        "BTCUSDT",
+        trader.build_target("BTCUSDT", "Long", 100, notional=100),
+        taker_fee_rate=Decimal(0),
     )
     with pytest.raises(ValueError, match=r"Closing price"):
         _ = trader.available_capital("BTCUSDT", 100, closing_price=0)

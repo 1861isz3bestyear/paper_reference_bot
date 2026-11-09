@@ -8,13 +8,17 @@ from contextlib import closing
 from io import BytesIO
 from typing import TYPE_CHECKING
 
-import pytest
 import requests
 
 from server_bot.tunnel_archive import collect
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import pytest
+
+
+ARCHIVE_SNAPSHOT_COUNT = 2
 
 
 def test_collection_survives_restart_and_missing_margin(
@@ -28,7 +32,12 @@ def test_collection_survives_restart_and_missing_margin(
     responses: list[requests.Response] = []
 
     def get(*_args: object, **_kwargs: object) -> requests.Response:
-        """Get."""
+        """Get.
+
+        Returns:
+            The get result.
+
+        """
         return responses.pop(0)
 
     monkeypatch.setattr(session, "get", get)
@@ -37,26 +46,19 @@ def test_collection_survives_restart_and_missing_margin(
     response.raw = BytesIO(b'{"result": {"raw": [1, 2]}, "retCode": 0}')
     responses.extend([response] * 16)
     path = tmp_path / "nested" / "archive.sqlite"
-    if collect(path, session) != 1:
-        pytest.fail("Expected collect(path, session) == 1")
-    if collect(path, session) != 1:
-        pytest.fail("Expected collect(path, session) == 1")
+    assert collect(path, session) == 1
+    assert collect(path, session) == 1
     with closing(sqlite3.connect(path)) as db:
         rows = db.execute(
             "SELECT source, requested_at, available_at, payload, error "
             "FROM tunnel_inputs ORDER BY id"
         ).fetchall()
     expected_rows = 18
-    if len(rows) != expected_rows:
-        pytest.fail("Expected len(rows) == 18")
-    if rows[0][3] != response.text:
-        pytest.fail("Expected rows[0][3] == response.text")
-    if not ((rows[0][1]) <= (rows[0][2])):
-        pytest.fail("Expected rows[0][1] <= rows[0][2]")
-    if rows[8][0] != "margin":
-        pytest.fail("Expected rows[8][0] == 'margin'")
-    if rows[8][4] != "ValueError":
-        pytest.fail("Expected rows[8][4] == 'ValueError'")
+    assert len(rows) == expected_rows
+    assert rows[0][3] == response.text
+    assert rows[0][1] <= rows[0][2]
+    assert rows[8][0] == "margin"
+    assert rows[8][4] == "ValueError"
 
 
 def test_exchange_failure_keeps_body_and_continues(
@@ -69,7 +71,12 @@ def test_exchange_failure_keeps_body_and_continues(
     responses: list[requests.Response] = []
 
     def get(*_args: object, **_kwargs: object) -> requests.Response:
-        """Get."""
+        """Get.
+
+        Returns:
+            The get result.
+
+        """
         return responses.pop(0)
 
     monkeypatch.setattr(session, "get", get)
@@ -81,14 +88,11 @@ def test_exchange_failure_keeps_body_and_continues(
     good.raw = BytesIO(b'{"result": []}')
     responses.extend([bad, good, good, good, good, good, good, good])
     path = tmp_path / "archive.sqlite"
-    if collect(path, session) != 2:
-        pytest.fail("Expected collect(path, session) == 2")
+    assert collect(path, session) == ARCHIVE_SNAPSHOT_COUNT
     with closing(sqlite3.connect(path)) as db:
         rows = db.execute("SELECT payload, error FROM tunnel_inputs").fetchall()
-    if rows[0] != (bad.text, "ValueError"):
-        pytest.fail("Expected rows[0] == (bad.text, 'ValueError')")
-    if rows[1] != (good.text, ""):
-        pytest.fail("Expected rows[1] == (good.text, '')")
+    assert rows[0] == (bad.text, "ValueError")
+    assert rows[1] == (good.text, "")
 
 
 def test_minute_collection_preserves_all_sources_and_legacy_rows(
@@ -125,8 +129,7 @@ def test_minute_collection_preserves_all_sources_and_legacy_rows(
 
     monkeypatch.setattr(session, "get", get)
     results = (collect(path, session), collect(path, session))
-    if results != (0, 0):
-        pytest.fail("Every configured source must be saved successfully")
+    assert results == (0, 0)
     with closing(sqlite3.connect(path)) as db:
         legacy: list[tuple[object, ...]] = db.execute(
             "SELECT collection_id, minute_at FROM tunnel_inputs WHERE id = 1"
@@ -138,18 +141,12 @@ def test_minute_collection_preserves_all_sources_and_legacy_rows(
         sources_saved: list[tuple[str, str, str]] = db.execute(
             "SELECT source, payload, error FROM tunnel_inputs WHERE id > 1"
         ).fetchall()
-    if legacy != [(None, None)]:
-        pytest.fail("Migration must preserve legacy availability semantics")
+    assert legacy == [(None, None)]
     expected_passes = 2
-    if len(groups) != expected_passes or any(
-        row[2:] != (9, 9) for row in groups
-    ):
-        pytest.fail(
-            "Each pass must retain nine separately identifiable sources"
-        )
-    if any(not str(row[1]).endswith(":00+00:00") for row in groups):
-        pytest.fail("Collection labels must be UTC minute boundaries")
-    if {row[0] for row in sources_saved} != {
+    assert len(groups) == expected_passes
+    assert not (any(row[2:] != (9, 9) for row in groups))
+    assert not any(not str(row[1]).endswith(":00+00:00") for row in groups)
+    assert {row[0] for row in sources_saved} == {
         "instruments",
         "options",
         "spot",
@@ -159,13 +156,11 @@ def test_minute_collection_preserves_all_sources_and_legacy_rows(
         "hourly_candles",
         "oi",
         "margin",
-    }:
-        pytest.fail("A required snapshot tunnel source is missing")
-    if any(
+    }
+    assert not any(
         row[2] or '"preserved":[1,2,3]' not in row[1] for row in sources_saved
-    ):
-        pytest.fail("Archive must preserve successful payloads verbatim")
-    if (
+    )
+    assert (
         "https://api.bybit.com/v5/market/kline",
         {
             "category": "linear",
@@ -173,13 +168,8 @@ def test_minute_collection_preserves_all_sources_and_legacy_rows(
             "interval": "1",
             "limit": "1000",
         },
-    ) not in requested:
-        pytest.fail("Price history must use native one-minute candles")
-    if (
+    ) in requested
+    assert (
         "https://api.bybit.com/v5/market/tickers",
-        {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-        },
-    ) not in requested:
-        pytest.fail("Current open interest must be sampled each collection")
+        {"category": "linear", "symbol": "BTCUSDT"},
+    ) in requested

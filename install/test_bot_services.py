@@ -1,31 +1,41 @@
 # Copyright 2026 avwap-workspace-tests contributors
 
-import shutil
-from collections.abc import Sequence
-from datetime import tzinfo
-from pathlib import Path
-from subprocess import CompletedProcess
+"""Verify service selection, installation and diagnostic archives."""
 
-import bot_services as services
+import shutil
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 import pytest
+
+from . import bot_services as services
+from .bot_services import CommandResult
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from datetime import tzinfo
+
+
+TRADING_SERVICE_COUNT = 8
+COLLECTOR_SERVICE_COUNT = 2
+FAILED_COMMAND_EXIT_CODE = 7
 
 
 class FakeRunner:
     """Record service commands and return queued process results."""
 
     calls: list[tuple[list[str], dict[str, bool]]]
-    responses: list[CompletedProcess[str]]
+    responses: list[CommandResult]
 
     def __init__(
-        self, responses: Sequence[CompletedProcess[str]] | None = None
+        self, responses: Sequence[CommandResult] | None = None
     ) -> None:
         """Start with no recorded calls and optional queued responses."""
         self.calls = []
         self.responses = list(responses or [])
 
-    def __call__(
-        self, command: Sequence[str], **kwargs: bool
-    ) -> CompletedProcess[str]:
+    def __call__(self, command: Sequence[str], **kwargs: bool) -> CommandResult:
         """Record a command and consume a queued result when available.
 
         Returns:
@@ -35,11 +45,17 @@ class FakeRunner:
         self.calls.append((list(command), kwargs))
         if self.responses:
             return self.responses.pop(0)
-        return CompletedProcess(command, 0, "", "")
+        return CommandResult(args=command, returncode=0, stdout="", stderr="")
 
 
 @pytest.fixture
 def layout(tmp_path: Path) -> services.Layout:
+    """Resolve the service installation layout.
+
+    Returns:
+        The layout result.
+
+    """
     project = tmp_path / "server_bot"
     project.mkdir()
     for name in (
@@ -229,15 +245,22 @@ def test_check_services_success_and_failures(
         "8 run-bybit-mainnet\n"
     )
     okay = FakeRunner([
-        CompletedProcess([], 0, "", ""),
-        CompletedProcess([], 0, "", ""),
-        CompletedProcess([], 0, processes, ""),
+        CommandResult(args=[], returncode=0, stdout="", stderr=""),
+        CommandResult(args=[], returncode=0, stdout="", stderr=""),
+        CommandResult(args=[], returncode=0, stdout=processes, stderr=""),
     ])
     assert services.check_services(okay)
     bad = FakeRunner([
-        CompletedProcess([], 1, "disabled\n", "problem\n"),
-        CompletedProcess([], 0, "", ""),
-        CompletedProcess([], 0, processes + "4 run-bybit-demo\n", ""),
+        CommandResult(
+            args=[], returncode=1, stdout="disabled\n", stderr="problem\n"
+        ),
+        CommandResult(args=[], returncode=0, stdout="", stderr=""),
+        CommandResult(
+            args=[],
+            returncode=0,
+            stdout=processes + "4 run-bybit-demo\n",
+            stderr="",
+        ),
     ])
     assert not services.check_services(bad)
     output = capsys.readouterr().out
@@ -284,7 +307,15 @@ def test_redact_and_collect_logs(
 
     monkeypatch.setattr(services, "datetime", ArchiveClock)
     runner = FakeRunner(
-        [CompletedProcess([], 0, "BYBIT_API_KEY=secret\n", "")] * 9
+        [
+            CommandResult(
+                args=[],
+                returncode=0,
+                stdout="BYBIT_API_KEY=secret\n",
+                stderr="",
+            )
+        ]
+        * 9
     )
     archive = services.collect_logs(
         layout, tmp_path, runner, since="1 hour ago"
@@ -292,7 +323,7 @@ def test_redact_and_collect_logs(
     assert archive.name == "bot-diagnostics-STAMP.tar.gz"
     assert archive.is_file()
     report = tmp_path / "bot-diagnostics-STAMP"
-    assert len(list(report.iterdir())) == 8
+    assert len(list(report.iterdir())) == TRADING_SERVICE_COUNT
     assert "secret" not in (report / "bybit-demo.service.log").read_text()
     assert runner.calls[0][0][3:5] == ["--since", "1 hour ago"]
     assert runner.calls[0][0][1:3] == [
@@ -357,7 +388,7 @@ def test_main_install_preserves_selection_and_no_start(
 def test_main_failed_check_returns_nonzero(
     monkeypatch: pytest.MonkeyPatch, cli_layout: services.Layout
 ) -> None:
-    """Return a failing CLI exit status when the selected services are unhealthy."""
+    """Fail the CLI when a selected service is unhealthy."""
 
     def check(*, entities: Sequence[str] | None) -> bool:
         assert entities is None
@@ -385,6 +416,7 @@ def test_main_uninstall_preserves_deployment(
 
 
 def test_main_log_collection_reports_archive(
+    *,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -461,5 +493,75 @@ def test_data_saver_logs_do_not_require_trading_state(
         layout, tmp_path, runner, entities=["data-saver"]
     )
     assert archive.is_file()
-    assert len(runner.calls) == 2
+    assert len(runner.calls) == COLLECTOR_SERVICE_COUNT
     assert all("server_bot.cli" not in call[0] for call in runner.calls)
+
+
+@pytest.mark.parametrize("entities", [["gex"], ["data-saver", "gex"]])
+def test_archive_install_without_trading_files(
+    layout: services.Layout, entities: list[str]
+) -> None:
+    """Install collectors without trading configuration or credentials."""
+    layout.config.unlink()
+    layout.paper_env.unlink()
+    layout.demo_env.unlink()
+    layout.bybit_env.unlink()
+    layout.monitor_env.unlink()
+    runner = FakeRunner()
+    services.install(layout, runner, entities=entities)
+    assert {path.name for path in layout.unit_dir.iterdir()} == set(
+        services.unit_names(entities)
+    )
+    text = (layout.unit_dir / "paper-gex-archive.service").read_text()
+    assert "python -m server_bot.tunnel_archive --asset BTC" in text
+    assert "--config" not in text
+    assert "--env" not in text
+    assert runner.calls[-1][0] == [
+        "systemctl",
+        "--user",
+        "start",
+        *services.service_names(entities),
+    ]
+
+
+@pytest.mark.parametrize("entities", [["gex"], ["data-saver", "gex"]])
+def test_archive_logs_without_trading_state(
+    layout: services.Layout, tmp_path: Path, entities: list[str]
+) -> None:
+    """Collect only journals and systemd status for collector selections."""
+    runner = FakeRunner()
+    archive = services.collect_logs(layout, tmp_path, runner, entities=entities)
+    assert archive.is_file()
+    assert len(runner.calls) == len(entities) + 1
+    assert all("server_bot.cli" not in call[0] for call in runner.calls)
+
+
+def test_command_runner_preserves_arguments_and_captures_streams() -> None:
+    """Pass whitespace and shell metacharacters as literal process arguments."""
+    argument = "two words; $(printf unexpected)"
+    result = services.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; print(sys.argv[1]); print('detail', file=sys.stderr)",
+            argument,
+        ],
+        capture_output=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout == argument + "\n"
+    assert result.stderr == "detail\n"
+
+
+def test_command_runner_reports_checked_and_unchecked_failures() -> None:
+    """Retain failed command output and enforce the requested exit policy."""
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; print('failed', file=sys.stderr); sys.exit(7)",
+    ]
+    result = services.run(command, check=False, capture_output=True)
+    assert result.returncode == FAILED_COMMAND_EXIT_CODE
+    assert result.stderr == "failed\n"
+    with pytest.raises(RuntimeError, match="exit code 7: failed"):
+        _ = services.run(command, capture_output=True)

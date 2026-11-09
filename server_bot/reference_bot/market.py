@@ -308,7 +308,7 @@ class BybitKlineWebSocket:
     def stop(self) -> None:
         """Stop."""
         self._stop.set()
-        if self._thread:
+        if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout=5)
 
     def health(self) -> WebSocketHealth:
@@ -337,7 +337,8 @@ class BybitKlineWebSocket:
             if connected:
                 self._connection_generation += 1
 
-    def _handle_message(self, raw: str) -> None:
+    def handle_message(self, raw: str) -> None:
+        """Validate and publish a confirmed websocket candle."""
         payload = json_object(raw)
         now = datetime.now(UTC).isoformat()
         with self._lock:
@@ -401,7 +402,7 @@ class BybitKlineWebSocket:
                     raw = socket.recv(timeout=1)
                 except TimeoutError:
                     continue
-                self._handle_message(
+                self.handle_message(
                     raw.decode() if isinstance(raw, bytes) else string(raw)
                 )
 

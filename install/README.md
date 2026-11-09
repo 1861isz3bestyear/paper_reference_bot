@@ -129,7 +129,7 @@ uv run --project ../server_bot python bot_services.py collect-logs \
   --entity demo --entity bybit --since "1 day ago"
 ```
 
-Valid entities are `reference`, `paper`, `demo`, `smtp`, and `bybit`. Real-money Bybit is deliberately
+Valid entities are `data-saver`, `gex`, `reference`, `paper`, `demo`, `smtp`, and `bybit`. Real-money Bybit is deliberately
 excluded from the default set and can only be installed or started when `--entity bybit` is
 given explicitly.
 
@@ -237,3 +237,40 @@ opt-in `test_installed_services.py` checks on a configured Linux host.
 
 This E2E run supplements the existing full-application and standalone-saver
 coverage gates; it does not replace either gate or depend on live exchange data.
+
+
+## Install only the GEX input archive
+
+From the cloned repository on Debian 11/12, run as the service user:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo loginctl enable-linger "$USER"
+cd ~/paper_reference_bot/paper/server_bot/install
+sh install.sh --entity gex
+export PATH="$HOME/.local/bin:$PATH"
+uv run --project ../server_bot python bot_services.py check --entity gex
+journalctl --user-unit=paper-gex-archive.service -f
+```
+
+The bootstrap obtains uv, Python and locked dependencies and enables and starts
+only `paper-gex-archive.service`. No trading configuration, trading bots, SMTP
+monitor or credential files are required. The default entity selection is unchanged.
+
+This service runs `server_bot.tunnel_archive --asset BTC` and saves raw inputs to
+`../server_bot/tunnel_inputs.sqlite` every minute. It collects Deribit option
+instruments, summaries (including IV and open interest), and index prices needed
+for GEX replay, plus Bybit market inputs. It does not calculate GEX. The additional
+Bybit margin-rate endpoint requires mainnet margin-read credentials in the process
+environment; without them that source records errors while public sources continue.
+The candle-only `data-saver` entity does not archive option-chain inputs.
+
+Use `status`, `stop`, `restart`, `uninstall`, or `collect-logs` with `--entity gex`
+to manage this service. Uninstalling preserves the archive. For ETH, override
+`ExecStart` with `systemctl --user edit paper-gex-archive.service` and use
+`--asset ETH` with a separate `--output` path.
+
+If you previously pointed `paper-data-saver.service` at the tunnel archive using
+a manual override, stop and disable that service before installing `gex` to avoid
+duplicate collection. Remove that manual override before reusing the candle service.

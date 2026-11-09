@@ -68,8 +68,8 @@ CONFIG_DIRECTORY = PAPER_BOT_CONFIG_FILE.parent / "configs"
 def start_both(config_path: Path, *, resume: bool = False) -> None:
     """Start both."""
     _ = PaperBotConfig.load(config_path)
-    start_reference(config_path, resume)
-    start_live(config_path, resume)
+    start_reference(config_path, resume=resume)
+    start_live(config_path, resume=resume)
 
 
 def stop_both() -> None:

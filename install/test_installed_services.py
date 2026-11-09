@@ -1,15 +1,18 @@
 # Copyright 2026 avwap-workspace-tests contributors
-"""Opt-in tests for services already installed in a Linux user systemd manager."""
+"""Check services installed in a Linux user systemd manager."""
 
 from __future__ import annotations
 
 import os
-import subprocess
 import tarfile
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-import bot_services
 import pytest
+
+from . import bot_services
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_SYSTEMD_INTEGRATION") != "1",
@@ -17,12 +20,24 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def command(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, check=True, text=True, capture_output=True)
+def command(*args: str) -> bot_services.CommandResult:
+    """Run a command and capture its output.
+
+    Returns:
+        The command result.
+
+    """
+    return bot_services.run(args, capture_output=True)
 
 
 @pytest.fixture(scope="module")
 def layout() -> bot_services.Layout:
+    """Resolve the service installation layout.
+
+    Returns:
+        The layout result.
+
+    """
     resolved = bot_services.resolve_layout()
     bot_services.validate_layout(resolved)
     return resolved

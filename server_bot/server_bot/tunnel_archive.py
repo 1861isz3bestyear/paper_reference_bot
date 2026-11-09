@@ -165,6 +165,9 @@ def collect(
     individual rows. No oscillator decisions or historical availability are
     inferred here. Returns the number of failed sources.
 
+    Returns:
+        The collect result.
+
     """
     requests_to_make = (
         *sources(asset),
@@ -192,7 +195,8 @@ def collect(
                 _validate_response(response)
             except (requests.RequestException, ValueError, TypeError) as exc:
                 available = datetime.now(UTC).isoformat()
-                # Exception URLs/headers may contain credentials. Keep only type.
+                # Exception URLs/headers may contain credentials. Keep only
+                # type.
                 error = type(exc).__name__
                 failures += 1
             with db:
@@ -225,7 +229,12 @@ class Arguments(argparse.Namespace):
 
 
 def main() -> None:
-    """Collect once or continuously without submitting exchange orders."""
+    """Collect once or continuously without submitting exchange orders.
+
+    Raises:
+        SystemExit: If the requested operation cannot safely proceed.
+
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument(
         "--output", type=Path, default=Path("tunnel_inputs.sqlite")

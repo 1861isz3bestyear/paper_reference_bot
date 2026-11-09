@@ -1,8 +1,11 @@
 # Copyright 2026 anchored-vwam-backtest contributors
 """Tests for live paper bot test market."""
 
+from __future__ import annotations
+
 import json
-from pathlib import Path
+import threading
+from typing import TYPE_CHECKING, Self
 from unittest.mock import Mock
 
 import pandas as pd
@@ -20,10 +23,26 @@ from live_paper_bot.market import (
     fetch_mexc_taker_fee_rate,
     reverse_candles,
 )
+from shared.testing_support import ignoring_arguments
+from shared.validation import json_object, object_mapping
+from tests.mock_support import call_kwargs, call_kwargs_at, mock_child
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
-def candle_frame(times=("2026-01-01T00:00:00Z",)) -> pd.DataFrame:
-    """Candle frame."""
+DOWNLOADED_CANDLE_COUNT = 2
+
+
+def candle_frame(
+    times: tuple[str, ...] = ("2026-01-01T00:00:00Z",)
+) -> pd.DataFrame:
+    """Candle frame.
+
+    Returns:
+        The validated candle observations.
+
+    """
     return pd.DataFrame({
         "time": pd.to_datetime(list(times)),
         "open": 1.0,
@@ -39,21 +58,19 @@ def candle_frame(times=("2026-01-01T00:00:00Z",)) -> pd.DataFrame:
 def test_candle_cache_upserts_filters_and_replaces(tmp_path: Path) -> None:
     """Verify candle cache upserts filters and replaces."""
     cache = CandleCache(tmp_path / "candles.sqlite")
-    if not (cache.load("BTCUSDT", "5m", start_ms=0, end_ms=10).empty):
-        pytest.fail("Expected cache.load('BTCUSDT', '5m', 0, 10).empty")
+    assert cache.load("BTCUSDT", "5m", start_ms=0, end_ms=10).empty
     frame = candle_frame(("2026-01-01T00:00:00Z", "2026-01-01T00:05:00Z"))
     cache.upsert("BTCUSDT", "5m", frame)
     changed = frame.iloc[:1].copy()
     changed.loc[changed.index[0], "close"] = 9
     cache.upsert("BTCUSDT", "5m", changed)
     loaded = cache.load("BTCUSDT", "5m", start_ms=0, end_ms=2_000_000_000_000)
-    if loaded["close"].tolist() != [9, 1.5]:
-        pytest.fail("Expected loaded['close'].tolist() == [9, 1.5]")
+    assert loaded["close"].tolist() == [9, 1.5]
     cache.upsert("BTCUSDT", "5m", pd.DataFrame())
 
 
 @pytest.mark.parametrize(
-    "payload, expected_error",
+    ("payload", "expected_error"),
     [
         ({"retCode": 1, "retMsg": "bad"}, "bad"),
         ({"retCode": 0, "result": {"list": []}}, "no valid"),
@@ -61,11 +78,11 @@ def test_candle_cache_upserts_filters_and_replaces(tmp_path: Path) -> None:
     ],
 )
 def test_fetch_live_price_validation(
-    monkeypatch: pytest.MonkeyPatch, payload, expected_error
+    monkeypatch: pytest.MonkeyPatch, payload: object, expected_error: str
 ) -> None:
     """Verify fetch live price validation."""
     response = Mock()
-    response.json.return_value = payload
+    mock_child(response, "json").return_value = payload
     monkeypatch.setattr(
         "live_paper_bot.market.requests.get", Mock(return_value=response)
     )
@@ -76,15 +93,14 @@ def test_fetch_live_price_validation(
 def test_fetch_live_price_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify fetch live price success."""
     response = Mock()
-    response.json.return_value = {
+    mock_child(response, "json").return_value = {
         "retCode": 0,
         "result": {"list": [{"lastPrice": "12.5"}]},
     }
     get = Mock(return_value=response)
     monkeypatch.setattr("live_paper_bot.market.requests.get", get)
-    if fetch_live_price("BTCUSDT") != 12.5:
-        pytest.fail("Expected fetch_live_price('BTCUSDT') == 12.5")
-    response.raise_for_status.assert_called_once()
+    assert fetch_live_price("BTCUSDT") == pytest.approx(12.5)
+    mock_child(response, "raise_for_status").assert_called_once()
 
 
 def test_rest_klines_paginate_deduplicate_and_drop_open_candle(
@@ -99,23 +115,21 @@ def test_rest_klines_paginate_deduplicate_and_drop_open_candle(
         [["300000", "1", "2", ".5", "1.5", "3", "4.5"]],
         [],
     ]
-    responses = []
+    responses: list[Mock] = []
     for page in pages:
         response = Mock()
-        response.json.return_value = {"retCode": 0, "result": {"list": page}}
+        mock_child(response, "json").return_value = {
+            "retCode": 0,
+            "result": {"list": page},
+        }
         responses.append(response)
     get = Mock(side_effect=responses)
     monkeypatch.setattr("live_paper_bot.market.requests.get", get)
     result = fetch_completed_linear_klines(
         "BTCUSDT", "5m", start_ms=0, end_ms=700_000
     )
-    if result["time"].tolist() != [pd.Timestamp("1970-01-01T00:05:00Z")]:
-        pytest.fail(
-            "Expected result['time'].tolist() =="
-            " [pd.Timestamp('1970-01-01T00:05:00Z')]"
-        )
-    if len(get.call_args_list) != 2:
-        pytest.fail("Expected len(get.call_args_list) == 2")
+    assert result["time"].tolist() == [pd.Timestamp("1970-01-01T00:05:00Z")]
+    assert len(get.call_args_list) == DOWNLOADED_CANDLE_COUNT
 
 
 def test_rest_klines_validation_and_empty(
@@ -125,20 +139,20 @@ def test_rest_klines_validation_and_empty(
     with pytest.raises(ValueError, match="does not support"):
         _ = fetch_completed_linear_klines("BTCUSDT", "2m", start_ms=0, end_ms=1)
     response = Mock()
-    response.json.return_value = {"retCode": 0, "result": {"list": []}}
+    mock_child(response, "json").return_value = {
+        "retCode": 0,
+        "result": {"list": []},
+    }
     monkeypatch.setattr(
         "live_paper_bot.market.requests.get", Mock(return_value=response)
     )
-    if not (
-        fetch_completed_linear_klines(
-            "BTCUSDT", "5m", start_ms=0, end_ms=1
-        ).empty
-    ):
-        pytest.fail(
-            "Expected fetch_completed_linear_klines('BTCUSDT', '5m', 0,"
-            " 1).empty"
-        )
-    response.json.return_value = {"retCode": 2, "retMsg": "limited"}
+    assert fetch_completed_linear_klines(
+        "BTCUSDT", "5m", start_ms=0, end_ms=1
+    ).empty
+    mock_child(response, "json").return_value = {
+        "retCode": 2,
+        "retMsg": "limited",
+    }
     with pytest.raises(ValueError, match="limited"):
         _ = fetch_completed_linear_klines("BTCUSDT", "5m", start_ms=0, end_ms=1)
 
@@ -148,17 +162,21 @@ def test_mexc_rest_price_candles_and_reverse(
 ) -> None:
     """Verify mexc rest price candles and reverse."""
     price_response = Mock()
-    price_response.json.return_value = {"symbol": "SHIBUSDT", "price": "0.25"}
+    mock_child(price_response, "json").return_value = {
+        "symbol": "SHIBUSDT",
+        "price": "0.25",
+    }
     monkeypatch.setattr(
         "live_paper_bot.market.requests.get", Mock(return_value=price_response)
     )
-    if fetch_mexc_live_price("SHIBUSDT") != 0.25:
-        pytest.fail("Expected fetch_mexc_live_price('SHIBUSDT') == 0.25")
+    assert fetch_mexc_live_price("SHIBUSDT") == pytest.approx(0.25)
 
     page = Mock()
-    page.json.return_value = [[0, "2", "4", "1", "2.5", "3", 59_999, "7.5"]]
+    mock_child(page, "json").return_value = [
+        [0, "2", "4", "1", "2.5", "3", 59_999, "7.5"]
+    ]
     empty = Mock()
-    empty.json.return_value = []
+    mock_child(empty, "json").return_value = []
     get = Mock(side_effect=[page, empty])
     monkeypatch.setattr("live_paper_bot.market.requests.get", get)
     candles = fetch_completed_mexc_klines(
@@ -166,31 +184,14 @@ def test_mexc_rest_price_candles_and_reverse(
     )
     reversed_candles = reverse_candles(candles)
 
-    if candles["close"].tolist() != [2.5]:
-        pytest.fail("Expected candles['close'].tolist() == [2.5]")
-    if get.call_args_list[0].kwargs["params"]["interval"] != "1m":
-        pytest.fail(
-            "Expected get.call_args_list[0].kwargs['params']['interval'] =="
-            " '1m'"
-        )
-    if reversed_candles.iloc[0][["open", "high", "low", "close"]].tolist() != [
-        0.5,
-        1.0,
-        0.25,
-        0.4,
-    ]:
-        pytest.fail(
-            "Expected reversed_candles.iloc[0][['open', 'high', 'low',"
-            " 'close']].tolist() == [0.5, 1.0, 0.25, 0.4]"
-        )
-    if reversed_candles.iloc[0][["volume", "quote_asset_volume"]].tolist() != [
-        7.5,
-        3.0,
-    ]:
-        pytest.fail(
-            "Expected reversed_candles.iloc[0][['volume',"
-            " 'quote_asset_volume']].tolist() == [7.5, 3.0]"
-        )
+    assert candles["close"].tolist() == [2.5]
+    assert object_mapping(call_kwargs_at(get, 0)["params"])["interval"] == "1m"
+    assert reversed_candles.iloc[0][
+        ["open", "high", "low", "close"]
+    ].tolist() == [0.5, 1.0, 0.25, 0.4]
+    assert reversed_candles.iloc[0][
+        ["volume", "quote_asset_volume"]
+    ].tolist() == [7.5, 3.0]
 
 
 def test_mexc_validation_and_rest_feed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,7 +199,7 @@ def test_mexc_validation_and_rest_feed(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValueError, match="does not support"):
         _ = fetch_completed_mexc_klines("SHIBUSDT", "2m", start_ms=0, end_ms=1)
     response = Mock()
-    response.json.return_value = {"msg": "bad symbol"}
+    mock_child(response, "json").return_value = {"msg": "bad symbol"}
     monkeypatch.setattr(
         "live_paper_bot.market.requests.get", Mock(return_value=response)
     )
@@ -206,8 +207,7 @@ def test_mexc_validation_and_rest_feed(monkeypatch: pytest.MonkeyPatch) -> None:
         _ = fetch_completed_mexc_klines("BAD", "1m", start_ms=0, end_ms=1)
     feed = RestMarketFeed()
     feed.start()
-    if feed.health().connected:
-        pytest.fail("Expected not feed.health().connected")
+    assert not feed.health().connected
     feed.stop()
 
 
@@ -216,24 +216,23 @@ def test_mexc_taker_fee_comes_from_exchange(
 ) -> None:
     """Verify mexc taker fee comes from exchange."""
     response = Mock()
-    response.json.return_value = {
+    mock_child(response, "json").return_value = {
         "symbols": [{"symbol": "SHIBUSDT", "takerCommission": "0.0004"}]
     }
     get = Mock(return_value=response)
     monkeypatch.setattr("live_paper_bot.market.requests.get", get)
 
-    if str(fetch_mexc_taker_fee_rate("SHIBUSDT")) != "0.0004":
-        pytest.fail(
-            "Expected str(fetch_mexc_taker_fee_rate('SHIBUSDT')) == '0.0004'"
-        )
-    if get.call_args.kwargs["params"] != {"symbol": "SHIBUSDT"}:
-        pytest.fail(
-            "Expected get.call_args.kwargs['params'] == {'symbol': 'SHIBUSDT'}"
-        )
+    assert str(fetch_mexc_taker_fee_rate("SHIBUSDT")) == "0.0004"
+    assert call_kwargs(get)["params"] == {"symbol": "SHIBUSDT"}
 
 
-def websocket_message(confirm: bool = True) -> str:
-    """Websocket message."""
+def websocket_message(*, confirm: bool = True) -> str:
+    """Websocket message.
+
+    Returns:
+        The websocket message result.
+
+    """
     return json.dumps({
         "topic": "kline.5.BTCUSDT",
         "data": [{
@@ -251,84 +250,99 @@ def websocket_message(confirm: bool = True) -> str:
 
 def test_websocket_accepts_only_confirmed_matching_candles() -> None:
     """Verify websocket accepts only confirmed matching candles."""
-    received = []
+    received: list[pd.DataFrame] = []
     feed = BybitKlineWebSocket("BTCUSDT", "5m", received.append)
-    feed._handle_message(json.dumps({"topic": "other", "data": []}))
-    feed._handle_message(websocket_message(False))
-    feed._handle_message(websocket_message(True))
-    if len(received) != 1:
-        pytest.fail("Expected len(received) == 1")
-    if received[0].iloc[0]["close"] != 1.5:
-        pytest.fail("Expected received[0].iloc[0]['close'] == 1.5")
-    if feed.health().last_completed_candle != "2026-01-01T00:00:00+00:00":
-        pytest.fail(
-            "Expected feed.health().last_completed_candle =="
-            " '2026-01-01T00:00:00+00:00'"
-        )
-    with pytest.raises(ValueError):
+    feed.handle_message(json.dumps({"topic": "other", "data": []}))
+    feed.handle_message(websocket_message(confirm=False))
+    feed.handle_message(websocket_message(confirm=True))
+    assert len(received) == 1
+    assert pd.to_numeric(received[0]["close"]).astype(float).tolist()[
+        0
+    ] == pytest.approx(1.5)
+    assert feed.health().last_completed_candle == "2026-01-01T00:00:00+00:00"
+    with pytest.raises(ValueError, match="does not support interval"):
         _ = BybitKlineWebSocket("BTCUSDT", "2m", received.append)
 
 
 def test_websocket_worker_subscribes_and_stops_after_confirmed_candle() -> None:
     """Verify websocket worker subscribes and stops after confirmed candle."""
-    sockets = []
-    received = []
+    sockets: list[Socket] = []
+    received: list[pd.DataFrame] = []
 
     class Socket:
         """Represent socket."""
 
-        def __enter__(self):
-            """Enter the response context."""
+        def __init__(self) -> None:
+            self.sent: dict[str, object] = {}
+
+        def __enter__(self) -> Self:
+            """Enter the response context.
+
+            Returns:
+                The enter result.
+
+            """
             return self
 
-        def __exit__(self, *_) -> None:
+        def __exit__(self, *_: object) -> None:
             """Release the response context."""
             return
 
-        def send(self, value) -> None:
+        def send(self, value: str) -> None:
             """Send."""
-            self.sent = json.loads(value)
+            self.sent = json_object(value)
 
-        def recv(self, timeout):
-            """Recv."""
-            return websocket_message(True)
+        @staticmethod
+        def recv(timeout: float) -> str:
+            """Recv.
 
-    feed = None
+            Returns:
+                The recv result.
 
-    def on_candle(frame) -> None:
+            """
+            del timeout
+            return websocket_message(confirm=True)
+
+    confirmed = threading.Event()
+
+    def on_candle(frame: pd.DataFrame) -> None:
         """On candle."""
         received.append(frame)
-        feed._stop.set()
+        feed.stop()
+        confirmed.set()
 
-    def connect(url, **kwargs):
-        """Connect."""
-        if url != BYBIT_WEBSOCKET_URL:
-            pytest.fail("Expected url == BYBIT_WEBSOCKET_URL")
+    def connect(url: str, **kwargs: object) -> Socket:
+        """Connect.
+
+        Returns:
+            The connect result.
+
+        """
+        del kwargs
+        assert url == BYBIT_WEBSOCKET_URL
         socket = Socket()
         sockets.append(socket)
         return socket
 
     feed = BybitKlineWebSocket("BTCUSDT", "5m", on_candle, connect=connect)
-    feed._run()
-    if sockets[0].sent != {"op": "subscribe", "args": ["kline.5.BTCUSDT"]}:
-        pytest.fail(
-            "Expected sockets[0].sent == {'op': 'subscribe', 'args':"
-            " ['kline.5.BTCUSDT']}"
-        )
-    if len(received) != 1:
-        pytest.fail("Expected len(received) == 1")
-    if feed.health().connected:
-        pytest.fail("Expected not feed.health().connected")
+    feed.start()
+    assert confirmed.wait(timeout=5)
+    feed.stop()
+    assert sockets[0].sent == {"op": "subscribe", "args": ["kline.5.BTCUSDT"]}
+    assert len(received) == 1
+    assert not feed.health().connected
 
 
 def test_websocket_start_is_idempotent_and_stop_joins(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify websocket start is idempotent and stop joins."""
-    feed = BybitKlineWebSocket("BTCUSDT", "5m", lambda _: None)
+    feed = BybitKlineWebSocket(
+        "BTCUSDT", "5m", ignoring_arguments(lambda: None)
+    )
     worker = Mock()
-    worker.is_alive.return_value = True
-    feed._thread = worker
+    mock_child(worker, "is_alive").return_value = True
+    monkeypatch.setattr(feed, "_thread", worker)
     feed.start()
     feed.stop()
-    worker.join.assert_called_once_with(timeout=5)
+    mock_child(worker, "join").assert_called_once_with(timeout=5)

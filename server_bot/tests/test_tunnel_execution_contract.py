@@ -13,6 +13,7 @@ import pytest
 from shared.candles import Candle
 from shared.spot_execution import SpotAccount, SpotRisk
 from shared.strategy_data import BacktestWindow, PreparedBacktest
+from shared.testing_support import ignoring_arguments
 from shared.tunnel_execution import (
     TunnelEngine,
     TunnelExecutionSettings,
@@ -152,7 +153,7 @@ def test_tunnel_replay_combines_both_ledgers(*, session: bool) -> None:
     prepared = PreparedBacktest(
         data=data,
         scheduled_days=(
-            pd.Series([0] * 3).map(lambda _: date(2026, 1, 1))
+            pd.Series([0] * 3).map(ignoring_arguments(lambda: date(2026, 1, 1)))
             if session
             else None
         ),

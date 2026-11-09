@@ -111,7 +111,7 @@ def test_start_success_and_failures(
     runner = live_module if live else reference_module
     path = config(path=tmp_path / "config.json")
     child = Mock()
-    monkeypatch.setattr("subprocess.Popen", child)
+    monkeypatch.setattr("os.posix_spawn", child)
     monkeypatch.setattr(runner, "time", SimpleNamespace(sleep=Mock()))
     monkeypatch.setattr(runner, "read_pid", Mock(side_effect=[None, 123]))
     monkeypatch.setattr(runner, "process_is_running", Mock(return_value=True))

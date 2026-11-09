@@ -5,9 +5,9 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import re
 import shutil
-import subprocess
 import sys
 import tarfile
 from collections.abc import Callable, Sequence
@@ -17,6 +17,7 @@ from pathlib import Path
 
 ENTITY_SERVICES = {
     "data-saver": "paper-data-saver.service",
+    "gex": "paper-gex-archive.service",
     "reference": "paper-bot-reference.service",
     "paper": "paper-bot-live.service",
     "demo": "bybit-demo.service",
@@ -25,6 +26,7 @@ ENTITY_SERVICES = {
 }
 ENTITY_MARKERS = {
     "data-saver": "server_bot.data_saver",
+    "gex": "server_bot.tunnel_archive",
     "reference": "reference_bot.cli",
     "paper": "live_paper_bot.cli",
     "demo": "run-bybit-demo",
@@ -73,7 +75,17 @@ class Layout:
         return self.monitor_root / "smtp_monitor.env"
 
 
-Runner = Callable[..., subprocess.CompletedProcess[str]]
+@dataclass(frozen=True, kw_only=True)
+class CommandResult:
+    """Exit status and captured command output."""
+
+    args: Sequence[str]
+    returncode: int
+    stdout: str = ""
+    stderr: str = ""
+
+
+Runner = Callable[..., CommandResult]
 
 
 def resolve_layout(
@@ -162,7 +174,7 @@ def validate_layout(
     """
     selected = selected_entities(entities)
     required = [layout.project / "pyproject.toml"]
-    if set(selected) - {"data-saver"}:
+    if set(selected) - {"data-saver", "gex"}:
         required.append(layout.config)
     credential_paths: list[Path] = []
     if {"reference", "paper"} & set(selected):
@@ -211,6 +223,13 @@ def unit_contents(layout: Layout) -> dict[str, str]:
         "[Install]\nWantedBy=default.target\n"
     )
     commands = {
+        "paper-gex-archive.service": (
+            "GEX raw input archive",
+            (
+                f"{_quote(layout.uv)} run python -m server_bot.tunnel_archive"
+                " --asset BTC"
+            ),
+        ),
         "paper-data-saver.service": (
             "Public candle data saver",
             f"{_quote(layout.uv)} run python -m server_bot.data_saver",
@@ -273,18 +292,45 @@ def unit_contents(layout: Layout) -> dict[str, str]:
     return units
 
 
+async def _execute_process(
+    command: Sequence[str], *, capture_output: bool
+) -> CommandResult:
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE if capture_output else None,
+        stderr=asyncio.subprocess.PIPE if capture_output else None,
+    )
+    stdout, stderr = await process.communicate()
+    return CommandResult(
+        args=command,
+        returncode=await process.wait(),
+        stdout=stdout.decode(errors="replace") if stdout else "",
+        stderr=stderr.decode(errors="replace") if stderr else "",
+    )
+
+
 def run(
     command: Sequence[str], *, check: bool = True, capture_output: bool = False
-) -> subprocess.CompletedProcess[str]:
-    """Execute an installer command with text output.
+) -> CommandResult:
+    """Execute an argument vector directly, with optional output capture.
 
     Returns:
-        The completed process and any captured output.
+        The process status and captured text.
+
+    Raises:
+        RuntimeError: If a checked command fails.
 
     """
-    return subprocess.run(
-        command, check=check, text=True, capture_output=capture_output
+    result = asyncio.run(
+        _execute_process(command, capture_output=capture_output)
     )
+    if check and result.returncode:
+        message = (
+            f"Command {command[0]} failed with exit code {result.returncode}:"
+            f" {result.stderr}"
+        )
+        raise RuntimeError(message)
+    return result
 
 
 def install(
@@ -468,7 +514,7 @@ def collect_logs(
             str(layout.config),
         ],
     }
-    if selected_entities(entities) == ("data-saver",):
+    if set(selected_entities(entities)) <= {"data-saver", "gex"}:
         _ = commands.pop("bot-status.txt")
         _ = commands.pop("bot-stats.txt")
     for filename, command in commands.items():
@@ -567,7 +613,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         layout = resolve_layout(args.project, args.uv)
         return execute_command(args, layout)
-    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+    except (OSError, RuntimeError) as exc:
         _ = sys.stderr.write(f"Error: {exc}\n")
         return 1
 
