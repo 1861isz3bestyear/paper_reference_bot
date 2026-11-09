@@ -1,5 +1,15 @@
 # Project quality requirements
 
+## Shared code source of truth
+
+- `shared/` must have the same filenames and byte-for-byte contents as the
+  workspace's `backtest/shared/` directory.
+- `backtest/shared/` is the source of truth and has higher priority when the
+  copies differ. Make shared behavior changes there first, then synchronize
+  this project's `shared/` copy. Do not overwrite backtest with server-only
+  changes or maintain divergent shared implementations.
+- Preserve the shared-package parity contract tests and report mismatches.
+
 ## Formatting and linting
 
 - Run `uv run black --check .` and `uv run ruff check .` from the repository

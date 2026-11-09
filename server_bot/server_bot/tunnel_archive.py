@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlencode
+from uuid import uuid4
 
 import requests
 
@@ -75,6 +76,11 @@ def sources(asset: str) -> tuple[Source, ...]:
             params={**market, "interval": "1", "limit": "1000"},
         ),
         Source(
+            name="ticker",
+            url=BYBIT + "market/tickers",
+            params=market,
+        ),
+        Source(
             name="hourly_candles",
             url=BYBIT + "market/kline",
             params={**market, "interval": "60", "limit": "1000"},
@@ -127,6 +133,29 @@ def _validate_response(response: requests.Response) -> None:
         raise ValueError(msg)
 
 
+def _prepare_archive(db: sqlite3.Connection) -> None:
+    """Upgrade existing archives without discarding historical observations."""
+    with db:
+        _ = db.execute("""CREATE TABLE IF NOT EXISTS tunnel_inputs (
+                id INTEGER PRIMARY KEY, asset TEXT NOT NULL,
+                source TEXT NOT NULL, requested_at TEXT NOT NULL,
+                available_at TEXT NOT NULL, payload TEXT NOT NULL,
+                error TEXT NOT NULL)""")
+        schema: list[tuple[object, ...]] = db.execute(
+            "PRAGMA table_info(tunnel_inputs)"
+        ).fetchall()
+        columns = {row[1] for row in schema}
+        for name in ("collection_id", "minute_at"):
+            if name not in columns:
+                _ = db.execute(
+                    f"ALTER TABLE tunnel_inputs ADD COLUMN {name} TEXT"
+                )
+        _ = db.execute(
+            "CREATE INDEX IF NOT EXISTS tunnel_inputs_minute "
+            "ON tunnel_inputs(asset, minute_at, collection_id)"
+        )
+
+
 def collect(
     path: Path, session: requests.Session, *, asset: str = "BTC"
 ) -> int:
@@ -144,12 +173,9 @@ def collect(
     path.parent.mkdir(parents=True, exist_ok=True)
     failures = 0
     with closing(sqlite3.connect(path, timeout=30)) as db:
-        with db:
-            _ = db.execute("""CREATE TABLE IF NOT EXISTS tunnel_inputs (
-                    id INTEGER PRIMARY KEY, asset TEXT NOT NULL,
-                    source TEXT NOT NULL, requested_at TEXT NOT NULL,
-                    available_at TEXT NOT NULL, payload TEXT NOT NULL,
-                    error TEXT NOT NULL)""")
+        _prepare_archive(db)
+        collection_id = uuid4().hex
+        minute = datetime.now(UTC).replace(second=0, microsecond=0).isoformat()
         for source in requests_to_make:
             requested = datetime.now(UTC).isoformat()
             payload, error = "", ""
@@ -172,9 +198,19 @@ def collect(
             with db:
                 _ = db.execute(
                     """INSERT INTO tunnel_inputs
-                    (asset, source, requested_at, available_at, payload, error)
-                    VALUES (?, ?, ?, ?, ?, ?)""",
-                    (asset, source.name, requested, available, payload, error),
+                    (asset, source, requested_at, available_at, payload, error,
+                     collection_id, minute_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        asset,
+                        source.name,
+                        requested,
+                        available,
+                        payload,
+                        error,
+                        collection_id,
+                        minute,
+                    ),
                 )
     return failures
 
@@ -207,10 +243,10 @@ def main() -> None:
             _ = sys.stdout.write(
                 str(json.dumps({"failed_sources": failures})) + "\n"
             )
-            sys.stdout.flush()
+            _ = sys.stdout.flush()
             if args.once:
                 raise SystemExit(int(failures > 0))
-            time.sleep(args.poll_seconds)
+            time.sleep(args.poll_seconds - time.time() % args.poll_seconds)
 
 
 if __name__ == "__main__":

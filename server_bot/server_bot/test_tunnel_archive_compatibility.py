@@ -120,8 +120,8 @@ assert json_object(rows['spot'][0])['result']['index_price'] == 100000
     if result.returncode != 0:
         pytest.fail(result.stderr)
     with closing(sqlite3.connect(path)) as db:
-        if db.execute("SELECT COUNT(*) FROM tunnel_inputs").fetchone() != (8,):
+        if db.execute("SELECT COUNT(*) FROM tunnel_inputs").fetchone() != (9,):
             pytest.fail(
                 "Expected db.execute('SELECT COUNT(*) FROM"
-                " tunnel_inputs').fetchone() == (8,)"
+                " tunnel_inputs').fetchone() == (9,)"
             )

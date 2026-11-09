@@ -140,3 +140,32 @@ def test_corrupt_poll_timestamp_is_repaired(
         pytest.fail(
             "Expected float(lock.read_text(encoding='utf-8')) == 1000.0"
         )
+
+
+def test_next_minute_is_polled_without_waiting_after_slow_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Request latency must not add another full minute to the cadence."""
+    path = tmp_path / "archive.sqlite"
+    clock = [120.0]
+    calls: list[float] = []
+
+    def collect(_path: Path, _session: requests.Session) -> int:
+        """Simulate a slow poll.
+
+        Returns:
+            Zero failed sources.
+
+        """
+        calls.append(clock[0])
+        clock[0] += 45
+        return 0
+
+    monkeypatch.setattr(tunnel_runtime, "time", lambda: clock[0])
+    monkeypatch.setattr(tunnel_runtime, "collect", collect)
+    tunnel_runtime.poll_archive(path)
+    tunnel_runtime.poll_archive(path)
+    clock[0] = 180
+    tunnel_runtime.poll_archive(path)
+    if calls != [120.0, 180]:
+        pytest.fail("Poll once per UTC minute despite request latency")

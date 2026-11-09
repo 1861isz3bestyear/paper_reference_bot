@@ -40,13 +40,16 @@ def poll_archive(path: Path) -> None:
         except ValueError:
             LOGGER.warning("Ignoring invalid tunnel archive poll timestamp")
             last_poll = None
-        if last_poll is not None and 0 <= time() - last_poll < POLL_SECONDS:
+        if last_poll is not None and int(time() // POLL_SECONDS) == int(
+            last_poll // POLL_SECONDS
+        ):
             return
+        started = time()
         with requests.Session() as session:
             failures = collect(path, session)
         _ = lock.seek(0)
         _ = lock.truncate()
-        _ = lock.write(str(time()))
+        _ = lock.write(str(started))
         if failures:
             LOGGER.warning(
                 "Tunnel archive poll: %s unavailable sources", failures
@@ -59,7 +62,7 @@ def _run_archive(stop: threading.Event, path: Path) -> None:
             poll_archive(path)
         except OSError, sqlite3.Error, ValueError:
             LOGGER.exception("Tunnel archive poll failed")
-        _ = stop.wait(POLL_SECONDS)
+        _ = stop.wait(POLL_SECONDS - time() % POLL_SECONDS)
 
 
 @contextmanager
