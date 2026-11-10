@@ -7,7 +7,9 @@ import argparse
 import hashlib
 import hmac
 import json
+import logging
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -27,6 +29,22 @@ from shared.validation import json_object
 BYBIT = "https://api.bybit.com/v5/"
 BITGET = "https://api.bitget.com/api/v3/market/"
 DERIBIT = "https://www.deribit.com/api/v2/public/"
+LOGGER = logging.getLogger(__name__)
+BYBIT_ERROR_HINTS = {
+    10001: "Check margin-history request parameters.",
+    10002: "Check VPS UTC clock synchronization and request latency.",
+    10003: "Use a valid key for Bybit mainnet, not Demo or Testnet.",
+    10004: "Check that the API key and secret belong to the same key pair.",
+    10005: "Check the key's Unified Account Spot/margin-read permissions.",
+    10006: "Bybit rate limit reached; collection retries next poll.",
+    10007: "Bybit authentication failed; check the mainnet credentials.",
+    10010: "Check the key's allowed IPs against the VPS public IP.",
+    33004: "The Bybit API key has expired; replace it.",
+}
+
+
+class MissingMarginCredentialsError(ValueError):
+    """The collector environment does not contain both margin credentials."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -140,11 +158,11 @@ def _public_request(
 
 
 def _margin_request(session: requests.Session) -> requests.Response:
-    key = os.environ.get("BYBIT_API_KEY", "")
-    secret = os.environ.get("BYBIT_API_SECRET", "")
+    key = os.environ.get("BYBIT_API_KEY", "").strip()
+    secret = os.environ.get("BYBIT_API_SECRET", "").strip()
     if not key or not secret:
         msg = "Margin history requires BYBIT_API_KEY and BYBIT_API_SECRET."
-        raise ValueError(msg)
+        raise MissingMarginCredentialsError(msg)
     now = datetime.now(UTC)
     query = urlencode(
         {
@@ -182,6 +200,56 @@ def _validate_response(response: requests.Response, *, source: Source) -> None:
     if body.get("retCode", 0) != 0 or "error" in body or "result" not in body:
         msg = "Exchange returned an error or missing result."
         raise ValueError(msg)
+
+
+def _response_code(response: requests.Response | None) -> int | str | None:
+    """Extract only numeric API codes, never arbitrary exchange messages.
+
+    Returns:
+        A safe numeric error code, if the response includes one.
+
+    """
+    if response is None:
+        return None
+    try:
+        body = json_object(response.text)
+    except ValueError, TypeError:
+        return None
+    code = body.get("retCode", body.get("code"))
+    if isinstance(code, int) and not isinstance(code, bool):
+        return code
+    if isinstance(code, str) and re.fullmatch(r"[0-9]{5,6}", code):
+        return code
+    return None
+
+
+def _report_failure(
+    source: Source,
+    response: requests.Response | None,
+    error: Exception,
+) -> None:
+    """Log safe source diagnostics without exception text or response bodies."""
+    code = _response_code(response)
+    hint = "Check exchange availability and the archived response body locally."
+    if isinstance(error, MissingMarginCredentialsError):
+        hint = (
+            "Set BYBIT_API_KEY and BYBIT_API_SECRET in the service "
+            "environment; configure EnvironmentFile for your mainnet .env."
+        )
+    elif source.name == "margin" and isinstance(code, int):
+        hint = BYBIT_ERROR_HINTS.get(code, hint)
+    LOGGER.warning(
+        "Archive source failed: %s",
+        json.dumps({
+            "source": source.name,
+            "error": type(error).__name__,
+            "http_status": (
+                response.status_code if response is not None else None
+            ),
+            "api_code": code,
+            "hint": hint,
+        }),
+    )
 
 
 def _prepare_archive(db: sqlite3.Connection) -> None:
@@ -300,6 +368,7 @@ def collect(
         for source in requests_to_make:
             requested = datetime.now(UTC).isoformat()
             payload, error = "", ""
+            response: requests.Response | None = None
             try:
                 response = (
                     _margin_request(session)
@@ -315,6 +384,7 @@ def collect(
                 # type.
                 error = type(exc).__name__
                 failures += 1
+                _report_failure(source, response, exc)
             with db:
                 _store_observation(
                     db,

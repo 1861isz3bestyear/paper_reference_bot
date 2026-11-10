@@ -490,3 +490,38 @@ subsequent polls target ten-minute UTC boundaries. A successful pass now records
 12 sources (11 public plus authenticated Bybit margin history). Without Bybit
 margin credentials, one failure is expected, but inspect source errors to
 identify the actual failing source rather than assuming it is margin.
+
+### Diagnosing a failed margin source
+
+The collector logs each failed source before the `failed_sources` summary.
+Diagnostics include the source, exception type, HTTP status when a response
+was received, numeric API error code if present, and static troubleshooting
+advice. It never prints exception messages, exchange error messages, request
+URLs, headers, keys or signatures. Raw response bodies remain in the archive
+for local inspection.
+
+For example, a margin response with `retCode=10005` reports a permission hint;
+`10003` suggests checking that the key belongs to mainnet rather than Demo or
+Testnet, and `10002` suggests checking UTC clock synchronization. These are
+troubleshooting hints, not proof of the VPS failure's cause. HTTP failures,
+non-JSON responses and connection timeouts also identify the failed source.
+
+`MissingMarginCredentialsError` means one or both credentials are absent or
+blank in the process environment. The collector trims surrounding credential
+whitespace before signing. It still does not automatically load `.env` files.
+Create a private copy of `bybit-margin.env.example`, restrict it with
+`chmod 600 bybit-margin.env`, and enter your own mainnet credentials.
+A configured systemd `EnvironmentFile=` must point to a file containing the
+exact names `BYBIT_API_KEY` and `BYBIT_API_SECRET`; shell variables exported in
+an SSH terminal do not automatically become user-service environment variables.
+
+After updating the checkout and restarting the service, inspect recent logs:
+
+```bash
+journalctl --user-unit=paper-gex-archive.service -n 20 --no-pager
+```
+
+A restart collects immediately. Failure of margin history does not discard the
+other eleven sources or stop later collection passes. Without the VPS exchange
+response or its API code, a saved `ValueError` alone cannot establish whether
+the cause is credentials, permissions, clock skew or a rejected request.
