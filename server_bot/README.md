@@ -344,8 +344,8 @@ uv run python -m server_bot.tunnel_archive --once
 It records BTC (or `--asset ETH`) Deribit option instruments, option summaries
 and index price; Bybit top-50 linear depth, native one-minute OHLCV candles,
 current ticker price and open interest, hourly candle/open-interest warmup
-history, and USDT margin-rate history. Set `BYBIT_API_KEY` and
-`BYBIT_API_SECRET` with margin read access for the authenticated rate endpoint.
+history, and public Bitget loan-growth history and loan-rate quotes.
+No API keys are required.
 The collector never submits orders. The default polling interval is 60 seconds;
 use `--poll-seconds` to change it.
 
@@ -374,14 +374,12 @@ and the installed systemd services. It writes BTC inputs to
 A shared `tunnel_inputs.lock` serializes polls and preserves the polling cadence
 across bot restarts. Collection runs in a background thread and stops with its
 bot; another running bot continues polling. Archive errors are logged without
-interrupting trading. The archive survives bot resets. Margin credentials must
-be present in the process environment; executor-specific env files are not
-implicitly reused for the mainnet margin endpoint.
+interrupting trading. The archive survives bot resets.
 
 Automatic collection begins immediately and subsequent polls target UTC minute
 boundaries, without adding a full minute after each request cycle. Native price
 candles retain their exchange timestamps and OHLCV values. Open interest, depth,
-margin rates and option chains are minute observations, not synthetic OHLC
+loan growth, loan rates and option chains are minute observations, not synthetic OHLC
 candles; their native update frequency may be slower. Keep hourly history for
 indicator warmup. GEX replay uses instrument expiry/strike/type/contract size,
 option IV and open interest, and index price from the raw option responses.
@@ -463,11 +461,9 @@ observations. Bitget history may be revised; receipt times remain necessary for
 causal replay. This collector archives inputs; it does not calculate oscillator
 values or add compact-archive import support to the calculator.
 
-Bybit margin-rate history remains an independent authenticated source. Put
-`BYBIT_API_KEY` and `BYBIT_API_SECRET` in a private file and reference its absolute
-path with `EnvironmentFile=` under the GEX service's `[Service]` override. The
-collector does not implicitly load `.env` files. A missing margin key does not
-prevent public Bitget, Deribit or Bybit sources from being archived.
+The legacy authenticated Bybit margin-rate source has been removed. Existing
+archive rows remain intact. A collector-only `EnvironmentFile=` for Bybit keys
+can be removed from the service override; public collection needs no keys.
 
 ### Updating a VPS installation
 
@@ -487,41 +483,11 @@ The installed service override and databases are retained; do not reset state
 or rerun installation for an ordinary code update. Use the installed uv path
 if yours differs. A restart collects immediately; with a 600-second override,
 subsequent polls target ten-minute UTC boundaries. A successful pass now records
-12 sources (11 public plus authenticated Bybit margin history). Without Bybit
-margin credentials, one failure is expected, but inspect source errors to
-identify the actual failing source rather than assuming it is margin.
+11 public sources. A healthy pass reports `{"failed_sources": 0}`.
 
-### Diagnosing a failed margin source
+### Diagnosing a failed source
 
-The collector logs each failed source before the `failed_sources` summary.
-Diagnostics include the source, exception type, HTTP status when a response
-was received, numeric API error code if present, and static troubleshooting
-advice. It never prints exception messages, exchange error messages, request
-URLs, headers, keys or signatures. Raw response bodies remain in the archive
-for local inspection.
-
-For example, a margin response with `retCode=10005` reports a permission hint;
-`10003` suggests checking that the key belongs to mainnet rather than Demo or
-Testnet, and `10002` suggests checking UTC clock synchronization. These are
-troubleshooting hints, not proof of the VPS failure's cause. HTTP failures,
-non-JSON responses and connection timeouts also identify the failed source.
-
-`MissingMarginCredentialsError` means one or both credentials are absent or
-blank in the process environment. The collector trims surrounding credential
-whitespace before signing. It still does not automatically load `.env` files.
-Create a private copy of `bybit-margin.env.example`, restrict it with
-`chmod 600 bybit-margin.env`, and enter your own mainnet credentials.
-A configured systemd `EnvironmentFile=` must point to a file containing the
-exact names `BYBIT_API_KEY` and `BYBIT_API_SECRET`; shell variables exported in
-an SSH terminal do not automatically become user-service environment variables.
-
-After updating the checkout and restarting the service, inspect recent logs:
-
-```bash
-journalctl --user-unit=paper-gex-archive.service -n 20 --no-pager
-```
-
-A restart collects immediately. Failure of margin history does not discard the
-other eleven sources or stop later collection passes. Without the VPS exchange
-response or its API code, a saved `ValueError` alone cannot establish whether
-the cause is credentials, permissions, clock skew or a rejected request.
+The collector logs the source, exception type, HTTP status and numeric API
+code before the failure count. It never logs exception messages, URLs, headers
+or credentials. Raw response bodies remain in the archive for inspection.
+A failed source does not discard other sources or stop later polls.

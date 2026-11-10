@@ -7,6 +7,7 @@ import math
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import IntEnum
+from typing import Literal
 
 OSCILLATOR_MAXIMUM = 100
 
@@ -30,6 +31,7 @@ class TunnelSettings:
     state_override: TunnelState | None = None
     use_book: bool = True
     use_margin: bool = False
+    margin_source: Literal["bitget_growth"] = "bitget_growth"
     use_oi: bool = False
     votes: int = 1
     long_threshold: float = 60

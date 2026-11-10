@@ -216,9 +216,35 @@ available from the exchange.
 
 ### End-to-end CI checks
 
-Both Debian 11 and Debian 12 jobs run
-`tests/test_data_saver_e2e.py` and upload `data-saver-e2e.xml` with the other
-JUnit reports. To run these checks from the application directory:
+Both Debian 11 and Debian 12 jobs run tests in order: installer and monitor
+checks, standalone saver coverage, application unit tests, module/contract tests,
+component integration tests, then E2E tests. A failed step prevents every later
+test step from running; pytest stops at the first failure within each step.
+Report uploads still run after failures.
+
+The application stages record separate coverage files and combine them after
+E2E succeeds. The combined report retains the full production source scope,
+branch measurement and 92% threshold. E2E tests execute once per Debian job.
+
+`test_application_contract.py` executes the installer-generated commands against
+the real application parsers, using an isolated deployment path containing spaces.
+It covers all six bot/collector entry points and verifies both collectors reject
+invalid polling settings without credentials or new storage files. Trading
+commands must parse their generated options and reject missing configuration
+before starting. The tests use the existing locked application environment
+without dependency downloads or systemd.
+These checks establish command compatibility; actual systemd startup remains
+covered by the opt-in installed-service suite.
+
+Run the component checks from the application directory:
+
+```bash
+uv run --locked pytest -c pyproject.toml ../install/test_application_contract.py -m integration --no-cov
+```
+
+The E2E stage runs `tests/test_data_saver_e2e.py` and uploads
+`data-saver-e2e.xml` with the other JUnit reports. To run these checks from the
+application directory:
 
 ```bash
 uv run --locked pytest tests/test_data_saver_e2e.py -m e2e --no-cov
@@ -261,9 +287,9 @@ monitor or credential files are required. The default entity selection is unchan
 This service runs `server_bot.tunnel_archive --asset BTC` and saves raw inputs to
 `../server_bot/tunnel_inputs.sqlite` every minute. It collects Deribit option
 instruments, summaries (including IV and open interest), and index prices needed
-for GEX replay, plus Bybit market inputs. It does not calculate GEX. The additional
-Bybit margin-rate endpoint requires mainnet margin-read credentials in the process
-environment; without them that source records errors while public sources continue.
+for GEX replay, plus Bybit market inputs and public Bitget loan growth and
+loan-rate quotes. All 11 sources are public; API keys are not required.
+It does not calculate GEX.
 The candle-only `data-saver` entity does not archive option-chain inputs.
 
 Use `status`, `stop`, `restart`, `uninstall`, or `collect-logs` with `--entity gex`

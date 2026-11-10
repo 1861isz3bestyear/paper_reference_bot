@@ -19,14 +19,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-ARCHIVE_SNAPSHOT_COUNT = 2
-
-
-def test_collection_survives_restart_and_missing_margin(
+def test_collection_survives_restart_without_credentials(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify collection survives restart and missing margin."""
+    """Collect all public sources across restarts without API keys."""
     monkeypatch.delenv("BYBIT_API_KEY", raising=False)
     monkeypatch.delenv("BYBIT_API_SECRET", raising=False)
     session = requests.Session()
@@ -47,19 +44,17 @@ def test_collection_survives_restart_and_missing_margin(
     response.raw = BytesIO(b'{"result":{"raw":[1,2]},"code":"00000","data":[]}')
     responses.extend([response] * 22)
     path = tmp_path / "nested" / "archive.sqlite"
-    assert collect(path, session) == 1
-    assert collect(path, session) == 1
+    assert collect(path, session) == 0
+    assert collect(path, session) == 0
     with closing(sqlite3.connect(path)) as db:
         rows = db.execute(
             "SELECT source, requested_at, available_at, payload, error "
             "FROM tunnel_inputs ORDER BY id"
         ).fetchall()
-    expected_rows = 24
+    expected_rows = 22
     assert len(rows) == expected_rows
     assert rows[0][3] == response.text
     assert rows[0][1] <= rows[0][2]
-    assert rows[11][0] == "margin"
-    assert rows[11][4] == "MissingMarginCredentialsError"
 
 
 @pytest.mark.parametrize("storage_mode", ["raw", "compact"])
@@ -91,9 +86,7 @@ def test_exchange_failure_keeps_body_and_continues(
     good.raw = BytesIO(b'{"result":[],"code":"00000","data":[]}')
     responses.extend([bad, *([good] * 10)])
     path = tmp_path / "archive.sqlite"
-    assert collect(path, session, storage_mode=storage_mode) == (
-        ARCHIVE_SNAPSHOT_COUNT
-    )
+    assert collect(path, session, storage_mode=storage_mode) == 1
     with closing(sqlite3.connect(path)) as db:
         if storage_mode == "raw":
             rows: list[tuple[str, str]] = db.execute(
@@ -163,7 +156,7 @@ def test_minute_collection_preserves_all_sources_and_legacy_rows(
     assert legacy == [(None, None)]
     expected_passes = 2
     assert len(groups) == expected_passes
-    assert not (any(row[2:] != (12, 12) for row in groups))
+    assert not (any(row[2:] != (11, 11) for row in groups))
     assert not any(not str(row[1]).endswith(":00+00:00") for row in groups)
     assert {row[0] for row in sources_saved} == {
         "instruments",
@@ -174,7 +167,6 @@ def test_minute_collection_preserves_all_sources_and_legacy_rows(
         "ticker",
         "hourly_candles",
         "oi",
-        "margin",
         "bitget_growth_24h",
         "bitget_growth_30d",
         "bitget_loan_rate",
@@ -224,9 +216,9 @@ def test_compact_snapshots_preserve_payloads_and_deduplicate(
 
     monkeypatch.setattr(session, "get", get)
     path = tmp_path / "archive.sqlite"
-    assert collect(path, session, storage_mode="compact") == 1
-    assert collect(path, session, storage_mode="compact") == 1
-    assert collect(path, session) == 1
+    assert collect(path, session, storage_mode="compact") == 0
+    assert collect(path, session, storage_mode="compact") == 0
+    assert collect(path, session) == 0
     with closing(sqlite3.connect(path)) as db:
         stored: list[tuple[bytes]] = db.execute(
             "SELECT payload FROM tunnel_payloads"
@@ -243,12 +235,10 @@ def test_compact_snapshots_preserve_payloads_and_deduplicate(
         ).fetchall()
     assert {zlib.decompress(row[0]).decode("utf-8") for row in stored} == {
         payload,
-        "",
     }
-    assert groups == [(12,), (12,)]
-    assert raw_count == [(12,)]
+    assert groups == [(11,), (11,)]
+    assert raw_count == [(11,)]
     assert all(row[1] <= row[2] for row in rows)
-    assert rows[11][0::3] == ("margin", "MissingMarginCredentialsError")
 
 
 @pytest.mark.parametrize("asset", ["BTC", "ETH"])
@@ -279,7 +269,7 @@ def test_bitget_requests_match_local_feeds(
     monkeypatch.setattr(
         "server_bot.tunnel_archive.time", SimpleNamespace(sleep=pauses.append)
     )
-    assert collect(tmp_path / "archive.sqlite", session, asset=asset) == 1
+    assert collect(tmp_path / "archive.sqlite", session, asset=asset) == 0
     prefix = "https://api.bitget.com/api/v3/market/"
     assert requests_seen[-3:] == [
         (
@@ -292,6 +282,7 @@ def test_bitget_requests_match_local_feeds(
         ),
         (prefix + "margin-loans", {"coin": asset, "level": "vip0"}),
     ]
+    assert not any("spot-margin-trade" in url for url, _ in requests_seen)
     assert pauses == [1, 1, 1]
 
 
@@ -334,7 +325,7 @@ def test_bitget_failures_retain_evidence_and_other_sources(
 
     monkeypatch.setattr(session, "get", get)
     path = tmp_path / "archive.sqlite"
-    expected_failures = 4
+    expected_failures = 3
     assert (
         collect(path, session, storage_mode=storage_mode) == expected_failures
     )
@@ -355,3 +346,48 @@ def test_bitget_failures_retain_evidence_and_other_sources(
                 for body, error in compressed
             ]
     assert rows == [(payload.decode(), "ValueError")] * 3
+
+
+@pytest.mark.parametrize("payload", [b"not JSON", b'{"code":"sensitive text"}'])
+def test_public_failures_log_safe_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    *,
+    payload: bytes,
+) -> None:
+    """Preserve failed response evidence without logging arbitrary messages."""
+    session = requests.Session()
+
+    def get(*_args: object, **_kwargs: object) -> requests.Response:
+        """Return an invalid exchange response.
+
+        Returns:
+            A response containing untrusted diagnostic text.
+
+        """
+        response = requests.Response()
+        response.status_code = 200
+        response.raw = BytesIO(payload)
+        return response
+
+    monkeypatch.setattr(session, "get", get)
+    pauses: list[float] = []
+    monkeypatch.setattr(
+        "server_bot.tunnel_archive.time", SimpleNamespace(sleep=pauses.append)
+    )
+    source_count = 11
+    assert collect(tmp_path / "archive.sqlite", session) == source_count
+    assert '"api_code": null' in caplog.text
+    assert "sensitive text" not in caplog.text
+    assert "not JSON" not in caplog.text
+
+
+def test_collector_rejects_unsupported_asset(tmp_path: Path) -> None:
+    """Reject unsupported assets before persistence or network requests."""
+    with (
+        requests.Session() as session,
+        pytest.raises(ValueError, match="Asset"),
+    ):
+        _ = collect(tmp_path / "archive.sqlite", session, asset="SOL")
+    assert not (tmp_path / "archive.sqlite").exists()

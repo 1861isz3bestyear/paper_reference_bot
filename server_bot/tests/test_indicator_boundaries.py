@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, time, timedelta
+from datetime import UTC, date, time
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -11,9 +11,9 @@ import pytest
 
 from shared import indicators, time_utils, validation
 from shared.order_book import BookLevel, BookSnapshot
+from shared.tunnel import TunnelSettings
+from shared.tunnel_config import parse_tunnel, tunnel_values
 from shared.tunnel_oscillators import (
-    BorrowRate,
-    borrow_rate_rsi,
     limit_order_oscillator_rate,
 )
 
@@ -196,26 +196,6 @@ def test_external_row_validation() -> None:
         _ = validation.database_rows([[1]])
 
 
-@pytest.mark.parametrize(
-    ("rates", "expected"),
-    [([1.0] * 20, 50), (list(range(20)), 100), (list(range(20, 0, -1)), 0)],
-)
-def test_borrow_rate_warmup(rates: list[float], expected: float) -> None:
-    """Retain RSI warmup and handle flat, rising and falling interest rates."""
-    start = time_utils.utc_datetime(date(2026, 1, 1))
-    observations = tuple(
-        BorrowRate(timestamp=start + timedelta(hours=index), annual_rate=rate)
-        for index, rate in enumerate(rates)
-    )
-    result = borrow_rate_rsi(observations)
-    if result[:14] != (None,) * 14:
-        pytest.fail("Expected result[:14] == (None,) * 14")
-    if result[14:] != (expected,) * 6:
-        pytest.fail("Expected result[14:] == (expected,) * 6")
-    if borrow_rate_rsi(()) != ():
-        pytest.fail("Expected borrow_rate_rsi(()) == ()")
-
-
 def test_book_notional_oscillator() -> None:
     """Use quote notional instead of raw quantity and reject empty liquidity."""
     now = time_utils.utc_datetime(date(2026, 1, 1))
@@ -233,3 +213,13 @@ def test_book_notional_oscillator() -> None:
     empty = BookSnapshot(observed=now, available=now, bids=(), asks=())
     with pytest.raises(ValueError, match=r"notional"):
         _ = limit_order_oscillator_rate(empty)
+
+
+def test_margin_configuration_requires_bitget_marker() -> None:
+    """Reject legacy enabled-rate settings instead of changing their meaning."""
+    with pytest.raises(ValueError, match="Legacy"):
+        _ = parse_tunnel({"use_margin": True})
+    with pytest.raises(ValueError, match="Only Bitget"):
+        _ = parse_tunnel({"margin_source": "bybit"})
+    settings = TunnelSettings(use_margin=True)
+    assert parse_tunnel(tunnel_values(settings)) == settings

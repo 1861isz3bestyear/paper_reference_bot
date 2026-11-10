@@ -70,24 +70,34 @@ jobs:
           uv run --locked python -m reference_bot.cli --help
           uv run --locked python -m live_paper_bot.cli --help
           uv run --locked python ../install/bot_services.py --help
-      - name: Test application with existing coverage gate
-        working-directory: server_bot
-        run: uv run --locked pytest --junitxml=../test-results/application.xml
-      - name: Test standalone saver end to end
-        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
-        working-directory: server_bot
-        run: uv run --locked pytest tests/test_data_saver_e2e.py -m e2e --no-cov --junitxml=../test-results/data-saver-e2e.xml
+      - name: Test installer and service selection
+        working-directory: install
+        run: uv run --locked --project ../server_bot pytest -x -q test_bot_services.py --junitxml=../test-results/installer.xml
+      - name: Test SMTP monitor
+        working-directory: smtp_monitor
+        run: uv run --locked --project ../server_bot pytest -x -q --cov=monitor --cov-report=term-missing --cov-fail-under=90 --junitxml=../test-results/smtp.xml
       - name: Verify standalone saver coverage
         working-directory: server_bot
-        run: uv run --locked pytest server_bot/test_data_saver.py --cov-reset --cov=server_bot.data_saver --cov-branch --cov-fail-under=92
-      - name: Test installer and service selection
-        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
-        working-directory: install
-        run: uv run --locked --project ../server_bot pytest -q test_bot_services.py --junitxml=../test-results/installer.xml
-      - name: Test SMTP monitor
-        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
-        working-directory: smtp_monitor
-        run: uv run --locked --project ../server_bot pytest -q --cov=monitor --cov-report=term-missing --cov-fail-under=90 --junitxml=../test-results/smtp.xml
+        run: uv run --locked pytest -x server_bot/test_data_saver.py --cov-reset --cov=server_bot.data_saver --cov-branch --cov-fail-under=92
+      # Record disjoint stages using the unchanged coverage configuration.
+      # Default success() gating prevents all following test stages on failure.
+      - name: Test application units
+        working-directory: server_bot
+        run: uv run --locked coverage run --parallel-mode -m pytest -x -m "not module and not contract and not integration and not e2e" --no-cov --strict-markers --junitxml=../test-results/units.xml
+      - name: Test modules and contracts
+        working-directory: server_bot
+        run: uv run --locked coverage run --parallel-mode -m pytest -x -m "module or contract" --no-cov --strict-markers --junitxml=../test-results/modules.xml
+      - name: Test component integration
+        working-directory: server_bot
+        run: uv run --locked coverage run --parallel-mode -m pytest -x -c pyproject.toml . ../install/test_application_contract.py -m integration --no-cov --strict-markers --junitxml=../test-results/integration.xml
+      - name: Test application end to end
+        working-directory: server_bot
+        run: uv run --locked coverage run --parallel-mode -m pytest -x -m e2e --no-cov --strict-markers --junitxml=../test-results/data-saver-e2e.xml
+      - name: Verify combined application coverage
+        working-directory: server_bot
+        run: |
+          uv run --locked coverage combine
+          uv run --locked coverage report --fail-under=92
       - name: Upload test reports
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         uses: actions/upload-artifact@v4
