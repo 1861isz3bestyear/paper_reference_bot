@@ -59,7 +59,7 @@ def test_collection_survives_restart_and_missing_margin(
     assert rows[0][3] == response.text
     assert rows[0][1] <= rows[0][2]
     assert rows[11][0] == "margin"
-    assert rows[11][4] == "ValueError"
+    assert rows[11][4] == "MissingMarginCredentialsError"
 
 
 @pytest.mark.parametrize("storage_mode", ["raw", "compact"])
@@ -248,7 +248,7 @@ def test_compact_snapshots_preserve_payloads_and_deduplicate(
     assert groups == [(12,), (12,)]
     assert raw_count == [(12,)]
     assert all(row[1] <= row[2] for row in rows)
-    assert rows[11][0::3] == ("margin", "ValueError")
+    assert rows[11][0::3] == ("margin", "MissingMarginCredentialsError")
 
 
 @pytest.mark.parametrize("asset", ["BTC", "ETH"])
