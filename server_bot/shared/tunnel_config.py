@@ -39,7 +39,15 @@ def parse_tunnel(value: object) -> TunnelSettings:
     if values.keys() - defaults.keys():
         msg = "Unknown snapshot tunnel configuration fields."
         raise ValueError(msg)
+    if values.get("use_margin") is True and "margin_source" not in values:
+        msg = (
+            "Legacy margin configuration must be re-exported for Bitget growth."
+        )
+        raise ValueError(msg)
     defaults.update(values)
+    if defaults["margin_source"] != "bitget_growth":
+        msg = "Only Bitget growth is supported for the margin oscillator."
+        raise ValueError(msg)
     state = defaults["state_override"]
     return TunnelSettings(
         tight_width=number(defaults["tight_width"]),

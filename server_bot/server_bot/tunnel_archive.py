@@ -5,10 +5,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import hmac
 import json
 import logging
-import os
 import re
 import sqlite3
 import sys
@@ -16,10 +14,9 @@ import time
 import zlib
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
-from urllib.parse import quote, urlencode
 from uuid import uuid4
 
 import requests
@@ -30,21 +27,6 @@ BYBIT = "https://api.bybit.com/v5/"
 BITGET = "https://api.bitget.com/api/v3/market/"
 DERIBIT = "https://www.deribit.com/api/v2/public/"
 LOGGER = logging.getLogger(__name__)
-BYBIT_ERROR_HINTS = {
-    10001: "Check margin-history request parameters.",
-    10002: "Check VPS UTC clock synchronization and request latency.",
-    10003: "Use a valid key for Bybit mainnet, not Demo or Testnet.",
-    10004: "Check that the API key and secret belong to the same key pair.",
-    10005: "Check the key's Unified Account Spot/margin-read permissions.",
-    10006: "Bybit rate limit reached; collection retries next poll.",
-    10007: "Bybit authentication failed; check the mainnet credentials.",
-    10010: "Check the key's allowed IPs against the VPS public IP.",
-    33004: "The Bybit API key has expired; replace it.",
-}
-
-
-class MissingMarginCredentialsError(ValueError):
-    """The collector environment does not contain both margin credentials."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -157,38 +139,6 @@ def _public_request(
     return session.get(source.url, params=source.params, timeout=30)
 
 
-def _margin_request(session: requests.Session) -> requests.Response:
-    key = os.environ.get("BYBIT_API_KEY", "").strip()
-    secret = os.environ.get("BYBIT_API_SECRET", "").strip()
-    if not key or not secret:
-        msg = "Margin history requires BYBIT_API_KEY and BYBIT_API_SECRET."
-        raise MissingMarginCredentialsError(msg)
-    now = datetime.now(UTC)
-    query = urlencode(
-        {
-            "currency": "USDT",
-            "vipLevel": "No VIP",
-            "startTime": int((now - timedelta(days=30)).timestamp() * 1000),
-            "endTime": int(now.timestamp() * 1000),
-        },
-        quote_via=quote,
-    )
-    stamp = str(int(now.timestamp() * 1000))
-    signature = hmac.new(
-        secret.encode(), f"{stamp}{key}5000{query}".encode(), hashlib.sha256
-    ).hexdigest()
-    return session.get(
-        BYBIT + "spot-margin-trade/interest-rate-history?" + query,
-        headers={
-            "X-BAPI-API-KEY": key,
-            "X-BAPI-TIMESTAMP": stamp,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "X-BAPI-SIGN": signature,
-        },
-        timeout=30,
-    )
-
-
 def _validate_response(response: requests.Response, *, source: Source) -> None:
     response.raise_for_status()
     body = json_object(response.text)
@@ -231,13 +181,6 @@ def _report_failure(
     """Log safe source diagnostics without exception text or response bodies."""
     code = _response_code(response)
     hint = "Check exchange availability and the archived response body locally."
-    if isinstance(error, MissingMarginCredentialsError):
-        hint = (
-            "Set BYBIT_API_KEY and BYBIT_API_SECRET in the service "
-            "environment; configure EnvironmentFile for your mainnet .env."
-        )
-    elif source.name == "margin" and isinstance(code, int):
-        hint = BYBIT_ERROR_HINTS.get(code, hint)
     LOGGER.warning(
         "Archive source failed: %s",
         json.dumps({
@@ -352,10 +295,7 @@ def collect(
         The collect result.
 
     """
-    requests_to_make = (
-        *sources(asset),
-        Source(name="margin", url="", params={}),
-    )
+    requests_to_make = sources(asset)
     path.parent.mkdir(parents=True, exist_ok=True)
     failures = 0
     with closing(sqlite3.connect(path, timeout=30)) as db:
@@ -370,11 +310,7 @@ def collect(
             payload, error = "", ""
             response: requests.Response | None = None
             try:
-                response = (
-                    _margin_request(session)
-                    if source.name == "margin"
-                    else _public_request(session, source)
-                )
+                response = _public_request(session, source)
                 available = datetime.now(UTC).isoformat()
                 payload = response.text
                 _validate_response(response, source=source)

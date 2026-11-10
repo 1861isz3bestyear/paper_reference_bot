@@ -101,7 +101,7 @@ def test_archive_matches_calculator_inputs(
 
     monkeypatch.setattr(session, "get", get)
     path = tmp_path / "archive.sqlite"
-    assert collect(path, session, asset=asset) == 1
+    assert collect(path, session, asset=asset) == 0
     # Separate process prevents imports from the server's shared package from
     # masking incompatibilities with the calculator's installed source tree.
     script = """
@@ -143,7 +143,7 @@ assert json_object(rows['spot'][0])['result']['index_price'] == 100000
     asyncio.run(check_calculator(script, calculator, path, asset=asset))
     with closing(sqlite3.connect(path)) as db:
         assert db.execute("SELECT COUNT(*) FROM tunnel_inputs").fetchone() == (
-            12,
+            11,
         )
 
 

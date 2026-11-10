@@ -11,8 +11,6 @@ import pytest
 from live_paper_bot import market as live_module
 from reference_bot import market as reference_module
 from server_bot import cli, tunnel_archive
-from shared.validation import object_mapping, string
-from tests.mock_support import call_args, call_kwargs
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -160,31 +158,3 @@ def test_archive_cli_once(
     expected_value = 2
     if error.value.code != expected_value:
         pytest.fail("Expected error.value.code == 2")
-
-
-def test_archive_margin_signing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Sign the read-only margin endpoint without persisting credentials."""
-    monkeypatch.setenv("BYBIT_API_KEY", "fixture-key")
-    monkeypatch.setenv("BYBIT_API_SECRET", "fixture-secret")
-    get = Mock(return_value=Mock(text='{"result":{},"code":"00000","data":[]}'))
-    session = Mock(get=get)
-    failures = tunnel_archive.collect(tmp_path / "archive.sqlite", session)
-    if failures != 0:
-        pytest.fail("Expected failures == 0")
-    if "interest-rate-history?currency=USDT" not in string(call_args(get)[0]):
-        pytest.fail(
-            "Expected 'interest-rate-history?currency=USDT' in"
-            " get.call_args.args[0]"
-        )
-    if (
-        object_mapping(call_kwargs(get)["headers"])["X-BAPI-API-KEY"]
-        != "fixture-key"
-    ):
-        pytest.fail(
-            "Expected get.call_args.kwargs['headers']['X-BAPI-API-KEY'] =="
-            " 'fixture-key'"
-        )
-    with pytest.raises(ValueError, match=r"BTC or ETH"):
-        _ = tunnel_archive.sources("DOGE")
