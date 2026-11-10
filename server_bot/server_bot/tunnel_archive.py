@@ -233,6 +233,7 @@ def _collect_batch(
     """
     failures = 0
     collection = collection or uuid4().hex
+    collection_started = datetime.now(UTC)
     for source in requests_to_make:
         requested = datetime.now(UTC)
         payload, error = "", ""
@@ -254,7 +255,8 @@ def _collect_batch(
                 payload=payload,
                 error=error,
                 collection=collection,
-            )
+            ),
+            collection_started=collection_started,
         )
     return failures
 

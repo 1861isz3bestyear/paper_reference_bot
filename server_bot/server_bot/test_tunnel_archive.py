@@ -6,6 +6,7 @@ from __future__ import annotations
 import sqlite3
 import zlib
 from contextlib import closing
+from datetime import UTC, datetime, timedelta, tzinfo
 from io import BytesIO
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal
@@ -121,6 +122,21 @@ def test_minute_collection_preserves_all_sources_and_legacy_rows(
             "INSERT INTO tunnel_inputs VALUES (1, 'BTC', 'spot', '', '',"
             " '{}', '')"
         )
+    start = datetime(2026, 11, 10, 11, 59, 59, tzinfo=UTC)
+    times = iter(start + timedelta(seconds=index) for index in range(38))
+
+    def now(_timezone: tzinfo) -> datetime:
+        """Advance the clock across a boundary for every request and receipt.
+
+        Returns:
+            The next deterministic timestamp.
+
+        """
+        return next(times)
+
+    monkeypatch.setattr(
+        "server_bot.tunnel_archive.datetime", SimpleNamespace(now=now)
+    )
     requested: list[tuple[str, object]] = []
     session = requests.Session()
 
@@ -157,6 +173,10 @@ def test_minute_collection_preserves_all_sources_and_legacy_rows(
     expected_passes = 2
     assert len(groups) == expected_passes
     assert not (any(row[2:] != (9, 9) for row in groups))
+    assert {row[1] for row in groups} == {
+        "2026-11-10T11:59:00+00:00",
+        "2026-11-10T12:00:00+00:00",
+    }
     assert not any(not str(row[1]).endswith(":00+00:00") for row in groups)
     assert {row[0] for row in sources_saved} == {
         "instruments",

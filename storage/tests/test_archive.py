@@ -133,3 +133,29 @@ def test_legacy_schema_is_upgraded_without_inventing_receipt_times(
         assert db.execute(
             "SELECT collection_id FROM tunnel_inputs WHERE id=1"
         ).fetchone() == (None,)
+
+
+@pytest.mark.parametrize("mode", ["raw", "compact"])
+def test_collection_minute_preserves_individual_response_times(
+    tmp_path: Path, observation: Observation, mode: Literal["raw", "compact"]
+) -> None:
+    """Keep a batch together across a boundary without changing causal times."""
+    archive = Archive(path=tmp_path / "archive.sqlite", mode=mode)
+    later = replace(
+        observation,
+        requested=STAMP + timedelta(minutes=1),
+        available=STAMP + timedelta(minutes=2),
+    )
+    archive.store(observation, collection_started=STAMP)
+    archive.store(later, collection_started=STAMP)
+    query = (
+        "SELECT DISTINCT minute_at FROM tunnel_inputs"
+        if mode == "raw"
+        else "SELECT DISTINCT minute_at FROM tunnel_observations"
+    )
+    with closing(sqlite3.connect(archive.path)) as db:
+        rows = db.execute(query).fetchall()
+    assert rows == [(STAMP.replace(second=0, microsecond=0).isoformat(),)]
+    assert archive.load(
+        Window(asset="BTC", start=STAMP, end=later.available)
+    ) == (observation, later)

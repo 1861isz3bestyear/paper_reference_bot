@@ -55,13 +55,25 @@ class Archive:
     path: Path
     mode: Literal["raw", "compact"] = "compact"
 
-    def store(self, observation: Observation) -> None:
+    def store(
+        self,
+        observation: Observation,
+        *,
+        collection_started: datetime | None = None,
+    ) -> None:
         """Durably commit one response before a consumer can load it."""
+        if collection_started is not None:
+            aware(collection_started)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.path, timeout=30)) as db:
             prepare(db)
             with db:
-                _insert(db, observation, mode=self.mode)
+                _insert(
+                    db,
+                    observation,
+                    mode=self.mode,
+                    collection_started=collection_started,
+                )
 
     def load(self, window: Window) -> tuple[Observation, ...]:
         """Read only successful observations received by the cutoff.
@@ -134,11 +146,13 @@ def _insert(
     observation: Observation,
     *,
     mode: Literal["raw", "compact"],
+    collection_started: datetime | None,
 ) -> None:
     requested = observation.requested.astimezone(UTC).isoformat()
     available = observation.available.astimezone(UTC).isoformat()
     minute = (
-        observation.requested.astimezone(UTC)
+        (collection_started or observation.requested)
+        .astimezone(UTC)
         .replace(second=0, microsecond=0)
         .isoformat()
     )
