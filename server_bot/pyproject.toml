@@ -5,11 +5,15 @@ description = "Reference and live-paper anchored VWAP bots sharing one configura
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "market-storage",
     "numpy>=2.0.0",
     "pandas>=2.2.0",
     "requests>=2.32.0",
     "websockets>=14.0",
 ]
+
+[tool.uv.sources]
+market-storage = { path = "../storage", editable = true }
 
 [dependency-groups]
 dev = [
@@ -85,6 +89,7 @@ max-bool-expr = 5
 max-nested-blocks = 3
 
 [tool.basedpyright]
+extraPaths = ["../storage"]
 pythonVersion = "3.14"
 pythonPlatform = "All"
 venvPath = "."

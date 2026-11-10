@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta, tzinfo
 from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol, override
@@ -461,6 +462,7 @@ def test_default_demo_command_uses_replica_executor(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Verify default demo command uses replica executor."""
+    monkeypatch.setattr(cli, "archive_while_running", nullcontext)
     config_path = tmp_path / "config.json"
     _ = config_path.write_text(config(ticker="XRP_USDT").to_json())
     env = tmp_path / "demo.env"

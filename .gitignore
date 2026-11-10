@@ -242,3 +242,6 @@ bybitdemoapi.env
 .env.*
 *.env
 *.env.*
+
+# Advisory lock shared by scheduled market collectors.
+*.collection.lock

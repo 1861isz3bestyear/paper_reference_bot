@@ -4,29 +4,34 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
+import fcntl
 import json
 import logging
 import re
-import sqlite3
 import sys
 import time
-import zlib
-from contextlib import closing
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 import requests
+from market_storage.archive import Archive
+from market_storage.models import Observation, asset_value
+from market_storage.models import Source as StoredSource
 
 from shared.validation import json_object
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 BYBIT = "https://api.bybit.com/v5/"
 BITGET = "https://api.bitget.com/api/v3/market/"
 DERIBIT = "https://www.deribit.com/api/v2/public/"
 LOGGER = logging.getLogger(__name__)
+COLLECTION_SECONDS = 300
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -38,77 +43,94 @@ class Source:
     params: dict[str, str]
 
 
-def sources(asset: str) -> tuple[Source, ...]:
-    """Return raw inputs required to reconstruct chains and oscillators.
+@dataclass(frozen=True, kw_only=True)
+class Endpoints:
+    """Exchange addresses, replaceable by deterministic HTTP test servers."""
+
+    bybit: str = BYBIT
+    bitget: str = BITGET
+    deribit: str = DERIBIT
+
+
+@dataclass(frozen=True, kw_only=True)
+class CollectionSettings:
+    """Independent schedule, retention and transport configuration."""
+
+    asset: str = "BTC"
+    storage_mode: Literal["raw", "compact"] = "compact"
+    retention: timedelta = timedelta(hours=24)
+    endpoints: Endpoints = Endpoints()
+
+    def __post_init__(self) -> None:
+        """Reject invalid configuration before creating files or requests.
+
+        Raises:
+            ValueError: If retention or asset is invalid.
+
+        """
+        _ = asset_value(self.asset)
+        if self.retention <= timedelta(0):
+            msg = "Retention must be positive."
+            raise ValueError(msg)
+
+
+def sources(
+    asset: str, *, endpoints: Endpoints | None = None
+) -> tuple[Source, ...]:
+    """Describe current GEX/book inputs, 5-minute OI, and hourly margin feeds.
 
     Returns:
-        Public source requests, including hourly warmup series.
-
-    Raises:
-        ValueError: If the asset is unsupported.
+        Public requests with no OHLCV or authenticated exchange data.
 
     """
-    if asset not in {"BTC", "ETH"}:
-        msg = "Asset must be BTC or ETH."
-        raise ValueError(msg)
+    endpoints = endpoints or Endpoints()
+    _ = asset_value(asset)
     market = {"category": "linear", "symbol": f"{asset}USDT"}
     return (
         Source(
             name="instruments",
-            url=DERIBIT + "get_instruments",
+            url=endpoints.deribit + "get_instruments",
             params={"currency": asset, "kind": "option", "expired": "false"},
         ),
         Source(
             name="options",
-            url=DERIBIT + "get_book_summary_by_currency",
+            url=endpoints.deribit + "get_book_summary_by_currency",
             params={"currency": asset, "kind": "option"},
         ),
         Source(
             name="spot",
-            url=DERIBIT + "get_index_price",
+            url=endpoints.deribit + "get_index_price",
             params={"index_name": asset.lower() + "_usd"},
         ),
         Source(
             name="depth",
-            url=BYBIT + "market/orderbook",
+            url=endpoints.bybit + "market/orderbook",
             params={**market, "limit": "50"},
         ),
         Source(
-            name="candles",
-            url=BYBIT + "market/kline",
-            params={**market, "interval": "1", "limit": "1000"},
-        ),
-        Source(
-            name="ticker",
-            url=BYBIT + "market/tickers",
-            params=market,
-        ),
-        Source(
-            name="hourly_candles",
-            url=BYBIT + "market/kline",
-            params={**market, "interval": "60", "limit": "1000"},
+            name="ticker", url=endpoints.bybit + "market/tickers", params=market
         ),
         Source(
             name="oi",
-            url=BYBIT + "market/open-interest",
-            params={**market, "intervalTime": "1h", "limit": "200"},
+            url=endpoints.bybit + "market/open-interest",
+            params={**market, "intervalTime": "5min", "limit": "1"},
         ),
-        *bitget_sources(asset),
+        *bitget_sources(asset, endpoint=endpoints.bitget),
     )
 
 
-def bitget_sources(asset: str) -> tuple[Source, ...]:
-    """Describe the same public lending feeds used by the local calculator.
+def bitget_sources(asset: str, *, endpoint: str = BITGET) -> tuple[Source, ...]:
+    """Describe hourly/daily loan growth and the current VIP0 quote.
 
     Returns:
-        Hourly/daily growth windows and the current VIP0 quote.
+        The public lending feeds used by the local calculator.
 
     """
     return (
         *(
             Source(
                 name=f"bitget_growth_{period}",
-                url=BITGET + "margin-loan-growth",
+                url=endpoint + "margin-loan-growth",
                 params={
                     "symbol": f"{asset}USDT",
                     "coin": asset,
@@ -119,7 +141,7 @@ def bitget_sources(asset: str) -> tuple[Source, ...]:
         ),
         Source(
             name="bitget_loan_rate",
-            url=BITGET + "margin-loans",
+            url=endpoint + "margin-loans",
             params={"coin": asset, "level": "vip0"},
         ),
     )
@@ -134,7 +156,7 @@ def _public_request(
         The original exchange response.
 
     """
-    if source.url.startswith(BITGET):
+    if source.name.startswith("bitget_"):
         time.sleep(1)
     return session.get(source.url, params=source.params, timeout=30)
 
@@ -142,7 +164,7 @@ def _public_request(
 def _validate_response(response: requests.Response, *, source: Source) -> None:
     response.raise_for_status()
     body = json_object(response.text)
-    if source.url.startswith(BITGET):
+    if source.name.startswith("bitget_"):
         if body.get("code") != "00000" or body.get("data") is None:
             msg = "Bitget returned an error or missing data."
             raise ValueError(msg)
@@ -195,87 +217,48 @@ def _report_failure(
     )
 
 
-def _prepare_archive(db: sqlite3.Connection) -> None:
-    """Upgrade existing archives without discarding historical observations."""
-    with db:
-        _ = db.execute("""CREATE TABLE IF NOT EXISTS tunnel_inputs (
-                id INTEGER PRIMARY KEY, asset TEXT NOT NULL,
-                source TEXT NOT NULL, requested_at TEXT NOT NULL,
-                available_at TEXT NOT NULL, payload TEXT NOT NULL,
-                error TEXT NOT NULL)""")
-        schema: list[tuple[object, ...]] = db.execute(
-            "PRAGMA table_info(tunnel_inputs)"
-        ).fetchall()
-        columns = {row[1] for row in schema}
-        for name in ("collection_id", "minute_at"):
-            if name not in columns:
-                _ = db.execute(
-                    f"ALTER TABLE tunnel_inputs ADD COLUMN {name} TEXT"
-                )
-        _ = db.execute(
-            "CREATE INDEX IF NOT EXISTS tunnel_inputs_minute "
-            "ON tunnel_inputs(asset, minute_at, collection_id)"
-        )
-
-
-def _prepare_compact_archive(db: sqlite3.Connection) -> None:
-    """Create compressed payload storage and timed observations."""
-    with db:
-        _ = db.execute("""CREATE TABLE IF NOT EXISTS tunnel_payloads (
-            digest TEXT PRIMARY KEY, codec TEXT NOT NULL,
-            payload BLOB NOT NULL)""")
-        _ = db.execute("""CREATE TABLE IF NOT EXISTS tunnel_observations (
-            id INTEGER PRIMARY KEY, asset TEXT NOT NULL,
-            source TEXT NOT NULL, requested_at TEXT NOT NULL,
-            available_at TEXT NOT NULL, digest TEXT NOT NULL
-                REFERENCES tunnel_payloads(digest),
-            error TEXT NOT NULL, collection_id TEXT NOT NULL,
-            minute_at TEXT NOT NULL)""")
-        _ = db.execute(
-            "CREATE INDEX IF NOT EXISTS tunnel_observations_minute "
-            "ON tunnel_observations(asset, minute_at, collection_id)"
-        )
-
-
-def _store_observation(
-    db: sqlite3.Connection,
-    values: tuple[str, ...],
+def _collect_batch(
+    archive: Archive,
+    session: requests.Session,
     *,
-    storage_mode: Literal["raw", "compact"],
-) -> None:
-    """Store exact response bytes once while retaining every observation."""
-    asset, source, requested, available, payload, error, collection, minute = (
-        values
-    )
-    if storage_mode == "raw":
-        _ = db.execute(
-            "INSERT INTO tunnel_inputs "
-            "(asset, source, requested_at, available_at, payload, error, "
-            "collection_id, minute_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            values,
+    requests_to_make: tuple[Source, ...],
+    asset: str,
+    collection: str | None = None,
+) -> int:
+    """Commit each response independently before exposing any calculation data.
+
+    Returns:
+        Number of failed sources, with exact failed responses kept as evidence.
+
+    """
+    failures = 0
+    collection = collection or uuid4().hex
+    collection_started = datetime.now(UTC)
+    for source in requests_to_make:
+        requested = datetime.now(UTC)
+        payload, error = "", ""
+        response: requests.Response | None = None
+        try:
+            response = _public_request(session, source)
+            payload = response.text
+            _validate_response(response, source=source)
+        except (requests.RequestException, ValueError, TypeError) as exc:
+            error = type(exc).__name__
+            failures += 1
+            _report_failure(source, response, exc)
+        archive.store(
+            Observation(
+                asset=asset_value(asset),
+                source=StoredSource(source.name),
+                requested=requested,
+                available=datetime.now(UTC),
+                payload=payload,
+                error=error,
+                collection=collection,
+            ),
+            collection_started=collection_started,
         )
-        return
-    encoded = payload.encode("utf-8")
-    digest = hashlib.sha256(encoded).hexdigest()
-    _ = db.execute(
-        "INSERT OR IGNORE INTO tunnel_payloads VALUES (?, 'zlib', ?)",
-        (digest, zlib.compress(encoded)),
-    )
-    _ = db.execute(
-        "INSERT INTO tunnel_observations "
-        "(asset, source, requested_at, available_at, digest, error, "
-        "collection_id, minute_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            asset,
-            source,
-            requested,
-            available,
-            digest,
-            error,
-            collection,
-            minute,
-        ),
-    )
+    return failures
 
 
 def collect(
@@ -285,57 +268,58 @@ def collect(
     asset: str = "BTC",
     storage_mode: Literal["raw", "compact"] = "raw",
 ) -> int:
-    """Commit each response independently, retaining failed-source diagnostics.
-
-    Raw JSON remains an external-data boundary; replay consumers must validate
-    individual rows. No oscillator decisions or historical availability are
-    inferred here. Returns the number of failed sources.
+    """Collect an explicit unscheduled batch for compatibility and diagnostics.
 
     Returns:
-        The collect result.
+        Number of failed sources. Production loops use collect_due instead.
 
     """
-    requests_to_make = sources(asset)
+    return _collect_batch(
+        Archive(path=path, mode=storage_mode),
+        session,
+        requests_to_make=sources(asset),
+        asset=asset,
+    )
+
+
+@contextmanager
+def _collection_lock(path: Path) -> Generator[None]:
+    """Serialize standalone and bot-owned collectors sharing one archive."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    failures = 0
-    with closing(sqlite3.connect(path, timeout=30)) as db:
-        if storage_mode == "raw":
-            _prepare_archive(db)
-        else:
-            _prepare_compact_archive(db)
-        collection_id = uuid4().hex
-        minute = datetime.now(UTC).replace(second=0, microsecond=0).isoformat()
-        for source in requests_to_make:
-            requested = datetime.now(UTC).isoformat()
-            payload, error = "", ""
-            response: requests.Response | None = None
-            try:
-                response = _public_request(session, source)
-                available = datetime.now(UTC).isoformat()
-                payload = response.text
-                _validate_response(response, source=source)
-            except (requests.RequestException, ValueError, TypeError) as exc:
-                available = datetime.now(UTC).isoformat()
-                # Exception URLs/headers may contain credentials. Keep only
-                # type.
-                error = type(exc).__name__
-                failures += 1
-                _report_failure(source, response, exc)
-            with db:
-                _store_observation(
-                    db,
-                    (
-                        asset,
-                        source.name,
-                        requested,
-                        available,
-                        payload,
-                        error,
-                        collection_id,
-                        minute,
-                    ),
-                    storage_mode=storage_mode,
-                )
+    with path.with_suffix(".collection.lock").open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def collect_due(
+    path: Path,
+    session: requests.Session,
+    *,
+    settings: CollectionSettings | None = None,
+) -> int:
+    """Collect sources due in their UTC buckets and enforce rolling retention.
+
+    Returns:
+        Number of failed sources; failures remain eligible for retry.
+
+    """
+    settings = settings or CollectionSettings()
+    archive = Archive(path=path, mode=settings.storage_mode)
+    with _collection_lock(path):
+        now = datetime.now(UTC)
+        due = tuple(
+            source
+            for source in sources(settings.asset, endpoints=settings.endpoints)
+            if archive.due(settings.asset, StoredSource(source.name), now=now)
+        )
+        failures = _collect_batch(
+            archive,
+            session,
+            requests_to_make=due,
+            asset=settings.asset,
+            collection=f"{settings.asset}:{int(now.timestamp()) // 300}",
+        )
+        archive.prune(now=datetime.now(UTC), retention=settings.retention)
     return failures
 
 
@@ -344,9 +328,13 @@ class Arguments(argparse.Namespace):
 
     output: Path = Path("tunnel_inputs.sqlite")
     asset: str = "BTC"
-    poll_seconds: int = 60
+    poll_seconds: int = 300
     once: bool = False
-    storage_mode: Literal["raw", "compact"] = "raw"
+    storage_mode: Literal["raw", "compact"] = "compact"
+    retention_hours: int = 24
+    bybit_url: str = BYBIT
+    bitget_url: str = BITGET
+    deribit_url: str = DERIBIT
 
 
 def main() -> None:
@@ -361,23 +349,38 @@ def main() -> None:
         "--output", type=Path, default=Path("tunnel_inputs.sqlite")
     )
     _ = parser.add_argument("--asset", choices=("BTC", "ETH"), default="BTC")
-    _ = parser.add_argument("--poll-seconds", type=int, default=60)
+    _ = parser.add_argument("--poll-seconds", type=int, default=300)
     _ = parser.add_argument("--once", action="store_true")
     _ = parser.add_argument(
-        "--storage-mode", choices=("raw", "compact"), default="raw"
+        "--storage-mode", choices=("raw", "compact"), default="compact"
     )
+    _ = parser.add_argument("--retention-hours", type=int, default=24)
+    _ = parser.add_argument("--bybit-url", default=BYBIT)
+    _ = parser.add_argument("--bitget-url", default=BITGET)
+    _ = parser.add_argument("--deribit-url", default=DERIBIT)
     args = Arguments()
     _ = parser.parse_args(namespace=args)
     if args.poll_seconds < 1:
         parser.error("--poll-seconds must be positive")
+    if args.poll_seconds > COLLECTION_SECONDS:
+        parser.error(
+            "--poll-seconds must not exceed the five-minute schedule (300)"
+        )
+    if args.retention_hours < 1:
+        parser.error("--retention-hours must be positive")
+    settings = CollectionSettings(
+        asset=args.asset,
+        storage_mode=args.storage_mode,
+        retention=timedelta(hours=args.retention_hours),
+        endpoints=Endpoints(
+            bybit=args.bybit_url,
+            bitget=args.bitget_url,
+            deribit=args.deribit_url,
+        ),
+    )
     with requests.Session() as session:
         while True:
-            failures = collect(
-                args.output,
-                session,
-                asset=args.asset,
-                storage_mode=args.storage_mode,
-            )
+            failures = collect_due(args.output, session, settings=settings)
             _ = sys.stdout.write(
                 str(json.dumps({"failed_sources": failures})) + "\n"
             )

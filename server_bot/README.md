@@ -331,159 +331,127 @@ running bot; stop the paper processes before starting with a different config.
 The demo executor prefers `bybitdemoapi.env`, with `bybitapidemo.env` as a legacy fallback.
 The demo loader accepts `BYBIT_API_KEY` / `BYBIT_API_SECRET` and `API_KEY` / `SECRET_API_KEY`.
 
-### Snapshot tunnel input archive
+### Scheduled market input archive
 
-Run the independent data collector from this directory:
-
-```bash
-uv run python -m server_bot.tunnel_archive --output tunnel_inputs.sqlite
-# One collection pass (nonzero exit if a source fails):
-uv run python -m server_bot.tunnel_archive --once
-```
-
-It records BTC (or `--asset ETH`) Deribit option instruments, option summaries
-and index price; Bybit top-50 linear depth, native one-minute OHLCV candles,
-current ticker price and open interest, hourly candle/open-interest warmup
-history, and public Bitget loan-growth history and loan-rate quotes.
-No API keys are required.
-The collector never submits orders. The default polling interval is 60 seconds;
-use `--poll-seconds` to change it.
-
-SQLite `tunnel_inputs` retains each raw JSON response, source, asset, request
-time, receipt/availability time and error type, including repeated observations
-across restarts. New rows also have a `collection_id` and UTC `minute_at`
-label so all sources in a pass can be joined without mixing separate polls.
-Existing rows are preserved with null collection/minute labels. The minute
-label is the collection start minute; actual receipt times determine when
-data can be used. Each source commits independently, so unavailable margin data
-cannot discard options or depth. Failed HTTP responses retain their bodies.
-Credentials and request headers are not stored.
-
-This is a raw archive, not the GUI snapshot database or a trading runner.
-Replay consumers must validate payload rows, join instrument definitions with
-summaries, and use receipt times to avoid future knowledge. Each pass saves the
-latest API window (1000 candles per interval and 200 hourly OI points); it does
-not backfill gaps or paginate historical OI. Current candles may be unfinished.
-Chain requests are sequential observations, not an atomic exchange snapshot.
-Continuous collection is required for historical option chains and depth.
-
-The archive also starts automatically alongside every reference, live-paper,
-Bybit demo and mainnet bot run, including launches through `server_bot.cli start`
-and the installed systemd services. It writes BTC inputs to
-`tunnel_inputs.sqlite` in the server project directory every 60 seconds.
-A shared `tunnel_inputs.lock` serializes polls and preserves the polling cadence
-across bot restarts. Collection runs in a background thread and stops with its
-bot; another running bot continues polling. Archive errors are logged without
-interrupting trading. The archive survives bot resets.
-
-Automatic collection begins immediately and subsequent polls target UTC minute
-boundaries, without adding a full minute after each request cycle. Native price
-candles retain their exchange timestamps and OHLCV values. Open interest, depth,
-loan growth, loan rates and option chains are minute observations, not synthetic OHLC
-candles; their native update frequency may be slower. Keep hourly history for
-indicator warmup. GEX replay uses instrument expiry/strike/type/contract size,
-option IV and open interest, and index price from the raw option responses.
-A missing source remains an explicit error, not a carried-forward value.
-Exchange outages or collection passes taking over a minute can leave gaps;
-historical option chains and order books cannot be backfilled by this collector.
-
-### Compact archive storage
-
-Use the optional compact mode for ten-minute snapshots:
+Run the collector from this directory:
 
 ```bash
-uv run python -m server_bot.tunnel_archive --asset BTC \
-  --storage-mode compact --poll-seconds 600 \
-  --output tunnel_inputs_compact.sqlite
+uv run --locked python -m server_bot.tunnel_archive
+uv run --locked python -m server_bot.tunnel_archive --once
 ```
 
-The default remains `--storage-mode raw` with a 60-second interval. Compact
-mode stores UTF-8 response text compressed with zlib in `tunnel_payloads`,
-keyed by its SHA-256 digest. Identical response bodies share one payload,
-including unchanged instrument definitions. `tunnel_observations` retains
-one row per source per pass, with asset, source, request/availability timestamps,
-error, collection ID, minute label and payload digest. Each source commits its
-payload and observation atomically. Failed response bodies are retained too.
+For BTC (or `--asset ETH`), the collector uses independent UTC schedules:
 
-Join observations to payloads on `digest`, then decode with
-`zlib.decompress(payload).decode("utf-8")` to recover the original response text.
-Existing raw-archive readers do not read these new tables. Use a separate output
-file for clarity; selecting a mode does not migrate or delete existing data.
-The schema can coexist with raw tables in the same database.
+| Inputs | Collection cadence |
+| --- | --- |
+| Deribit instrument definitions, option IV/OI summaries and index price | 5 minutes |
+| Bybit top-50 order book and current ticker price | 5 minutes |
+| Bybit latest historical OI observation (`intervalTime=5min`, `limit=1`) | 5 minutes |
+| Bitget hourly/daily loan-growth windows and current VIP0 interest quote | 1 hour |
 
-Compression is lossless and deduplication compares exact response text, so
-exchange timestamps or reordered JSON can prevent sharing. Full candle/OI
-windows are still collected; this mode does not implement incremental history
-or retention. Ten-minute polling reduces snapshot count by 90% but misses
-changes between snapshots. Measure actual disk growth after successful
-Deribit collection before sizing retention; no compression ratio is guaranteed.
+No candle OHLCV, exchange credentials or trading orders are involved. All nine
+sources are public. Bitget requests are spaced one second apart. `--poll-seconds`
+controls the scheduler wake-up (default 300; supported range 1–300), not the
+source intervals. The 30d Bitget growth window still contains daily observations;
+polling it hourly does not create hourly underlying data.
 
-For the installed GEX service, run
-`systemctl --user edit paper-gex-archive.service` and set:
+Successful requests are persisted before calculation consumers can load them.
+The current UTC bucket is checked in SQLite, so process restarts do not repeat
+successful feeds. Failed sources remain eligible for retry at the next wake-up.
+Retries share the original bucket's collection identity, so a recovered source
+can complete its GEX input group. A failed source never discards the others.
+Missing option chains and order books cannot be backfilled.
 
-```ini
-[Service]
-ExecStart=
-ExecStart=/home/USER/.local/bin/uv run python -m server_bot.tunnel_archive --asset BTC --storage-mode compact --poll-seconds 600 --output tunnel_inputs_compact.sqlite
+Compact storage is the default: exact UTF-8 responses are zlib-compressed and
+keyed by SHA-256, while each receipt retains its source, request time, availability
+time and collection identity. Identical response bytes share payload storage.
+`--storage-mode raw` remains available for diagnostics and existing readers.
+Old raw tables coexist with compressed tables; the independent reader handles
+both. Legacy OHLCV/authenticated-margin rows are not calculation inputs.
+
+The rolling retention default is **24 hours**, measured by receipt time. Set
+`--retention-hours` to a larger positive value for longer research history.
+Expired observations and unreferenced compressed payloads are removed after
+polls. SQLite reuses free pages; pruning does not promise that an existing file
+immediately shrinks. Existing expired records are subject to this retention.
+
+Collection also runs alongside bot processes, using the same schedule and compact
+storage. A shared collection lock prevents simultaneous standalone and bot-owned
+collectors from duplicating successful polls. Background collection errors do not
+stop trading.
+
+### Independent storage and VPS download
+
+The sibling `../storage/` project owns SQLite persistence, causal queries,
+retention, online backup and SSH transfer. It has no production dependencies on
+bot or calculator code. The application lockfile installs it as a local package;
+copy `storage/` alongside `server_bot/` and `install/` when deploying.
+
+From the deployment root on your local machine:
+
+```bash
+uv sync --locked --project storage
+uv run --locked --project storage python -m market_storage pull \
+  --host popoviktorv@YOUR_VPS \
+  --remote-root /home/popoviktorv/paper_reference_bot \
+  --output ./downloads/tunnel_inputs.sqlite
 ```
 
-Replace the uv path with the absolute executable path from the installed unit
-(`systemctl --user cat paper-gex-archive.service`). Keep its working directory.
-Then run `systemctl --user daemon-reload` and
-`systemctl --user restart paper-gex-archive.service`. This changes only the
-standalone GEX collector; bot-owned automatic collection still uses raw mode.
+The remote root must be absolute. SSH uses your existing configuration and agent
+in noninteractive mode. The remote storage package creates a consistent SQLite
+online backup, including committed WAL data, while collection continues. The
+local download is streamed to a temporary file, validated, and atomically
+published. Transfer or validation failure preserves the previous local file.
+A pull refreshes the local snapshot; it does not merge archives or change the VPS.
 
-### Bitget lending inputs
+`market_storage.inputs.load_inputs(Archive(path=...), window)` reads only committed
+successful observations available by the window cutoff. It exposes complete GEX
+collections and independent oscillator streams. Exchange field schemas are still
+validated by calculation consumers.
 
-Every archive pass also requests the same public Bitget feeds as the local
-calculator, for the selected BTC or ETH asset:
+In the sibling calculator project, the archive-first API is:
 
-- `bitget_growth_24h`: hourly base-coin margin-loan growth, using `period=24h`.
-- `bitget_growth_30d`: daily growth history, using `period=30d`.
-- `bitget_loan_rate`: current VIP0 daily/annual interest quote.
+```python
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
-All three feeds use the same collection cycle as the other sources. With
-`--poll-seconds 600`, each is archived every ten minutes; there is no separate
-Bitget polling loop.
+from gui_calculator.archived_market import calculate_archive
+from market_storage.models import Window
 
-These requests require no API key. They are spaced at least one second apart
-within each collector process. Bitget API errors and missing data are recorded
-as failures even when HTTP status is 200; failed response bodies remain archived.
-Both raw and compact modes retain the exchange timestamps inside the original
-JSON plus local request/receipt timestamps for each observation. Existing
-archives remain readable and new source rows are appended after an upgrade.
-No migration, reset or new systemd override is required.
+end = datetime.now(UTC)
+result = calculate_archive(
+    Path("../paper/server_bot/downloads/tunnel_inputs.sqlite"),
+    Window(asset="BTC", start=end - timedelta(hours=24), end=end),
+)
+```
 
-The growth oscillator uses 14 growth observations; the current loan-rate quote
-is separate context and is not a substitute for historical growth. Collecting
-every ten minutes does not turn hourly/daily exchange history into ten-minute
-observations. Bitget history may be revised; receipt times remain necessary for
-causal replay. This collector archives inputs; it does not calculate oscillator
-values or add compact-archive import support to the calculator.
-
-The legacy authenticated Bybit margin-rate source has been removed. Existing
-archive rows remain intact. A collector-only `EnvironmentFile=` for Bybit keys
-can be removed from the service override; public collection needs no keys.
+This calculates GEX strike exposures, order-book imbalance, hourly loan-growth
+momentum and five-minute OI divergence entirely from stored inputs. Incomplete
+GEX groups are omitted, malformed fields fail validation, and no live requests
+fill gaps. OI pairs recorded ticker prices from the matching five-minute bucket
+with received OI data, retaining actual availability times. These are sampled
+prices, not completed candle closes. The 12-hour OI lookback is preserved; price
+and OI gaps require warmup again. Hourly live-dashboard behavior is unchanged.
 
 ### Updating a VPS installation
 
-After the new version has been committed and pushed to your repository, run
-these commands on the VPS (adjust the checkout path if needed):
+After committing and pushing, run on the VPS:
 
 ```bash
 cd ~/paper_reference_bot
 git pull --ff-only
-cd server_bot
-~/.local/bin/uv sync --locked
+uv sync --locked --project server_bot
+uv sync --locked --project storage
 systemctl --user restart paper-gex-archive.service
 journalctl --user-unit=paper-gex-archive.service -n 20 --no-pager
 ```
 
-The installed service override and databases are retained; do not reset state
-or rerun installation for an ordinary code update. Use the installed uv path
-if yours differs. A restart collects immediately; with a 600-second override,
-subsequent polls target ten-minute UTC boundaries. A successful pass now records
-11 public sources. A healthy pass reports `{"failed_sources": 0}`.
+Inspect `systemctl --user cat paper-gex-archive.service` for old overrides. Change
+any `--poll-seconds 600` setting to `--poll-seconds 300`; longer wake-ups are now
+rejected so the five-minute schedule cannot silently become ten-minute sampling.
+After editing a unit, run `systemctl --user daemon-reload` before restarting.
+A healthy pass reports `{"failed_sources": 0}`; subsequent same-bucket runs can
+successfully do no work because all due inputs have already been committed.
 
 ### Diagnosing a failed source
 

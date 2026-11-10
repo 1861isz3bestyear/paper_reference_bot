@@ -147,7 +147,7 @@ def test_archive_cli_once(
         "sys.argv",
         ["archive", "--once", "--output", str(tmp_path / "archive.sqlite")],
     )
-    monkeypatch.setattr(tunnel_archive, "collect", Mock(return_value=1))
+    monkeypatch.setattr(tunnel_archive, "collect_due", Mock(return_value=1))
     with pytest.raises(SystemExit) as error:
         tunnel_archive.main()
     if error.value.code != 1:
@@ -158,3 +158,25 @@ def test_archive_cli_once(
     expected_value = 2
     if error.value.code != expected_value:
         pytest.fail("Expected error.value.code == 2")
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--poll-seconds", "600"],
+        ["--retention-hours", "0"],
+    ],
+)
+def test_archive_rejects_schedule_or_retention_before_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arguments: list[str]
+) -> None:
+    """Reject invalid settings before network or filesystem writes."""
+    output = tmp_path / "archive.sqlite"
+    monkeypatch.setattr(
+        "sys.argv", ["archive", "--output", str(output), *arguments]
+    )
+    with pytest.raises(SystemExit) as error:
+        tunnel_archive.main()
+    usage_error = 2
+    assert error.value.code == usage_error
+    assert not output.exists()

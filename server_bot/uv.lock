@@ -250,6 +250,22 @@ wheels = [
 ]
 
 [[package]]
+name = "market-storage"
+version = "0.1.0"
+source = { editable = "../storage" }
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "basedpyright", specifier = ">=1.40.2" },
+    { name = "black", specifier = "==26.5.1" },
+    { name = "pytest", specifier = ">=8.3.0" },
+    { name = "pytest-cov", specifier = ">=6.0.0" },
+    { name = "ruff", specifier = ">=0.17.4" },
+]
+
+[[package]]
 name = "mypy-extensions"
 version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -517,6 +533,7 @@ name = "server-bot"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "market-storage" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "requests" },
@@ -536,6 +553,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "market-storage", editable = "../storage" },
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "pandas", specifier = ">=2.2.0" },
     { name = "requests", specifier = ">=2.32.0" },

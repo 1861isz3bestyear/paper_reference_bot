@@ -227,7 +227,8 @@ def unit_contents(layout: Layout) -> dict[str, str]:
             "GEX raw input archive",
             (
                 f"{_quote(layout.uv)} run python -m server_bot.tunnel_archive"
-                " --asset BTC"
+                " --asset BTC --poll-seconds 300 --storage-mode compact"
+                " --retention-hours 24"
             ),
         ),
         "paper-data-saver.service": (

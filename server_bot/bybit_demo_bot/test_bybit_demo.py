@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -726,6 +727,7 @@ def test_run_demo_wires_env_config_and_lock(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Verify run demo wires env config and lock."""
+    monkeypatch.setattr(cli, "archive_while_running", nullcontext)
     config_path = tmp_path / "config.json"
     _ = config_path.write_text(config().to_json(), encoding="utf-8")
     env_path = tmp_path / "bybitapi.env"
@@ -754,6 +756,7 @@ def test_demo_default_env_name_and_credentials_are_wired_without_network(
     secret_name: str,
 ) -> None:
     """Load demo credentials without accessing the network."""
+    monkeypatch.setattr(cli, "archive_while_running", nullcontext)
     assert cli.ENV_FILE.name in {"bybitdemoapi.env", "bybitapidemo.env"}
     config_path = tmp_path / "config.json"
     _ = config_path.write_text(config().to_json(), encoding="utf-8")
