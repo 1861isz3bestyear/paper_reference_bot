@@ -143,7 +143,7 @@ assert json_object(rows['spot'][0])['result']['index_price'] == 100000
     asyncio.run(check_calculator(script, calculator, path, asset=asset))
     with closing(sqlite3.connect(path)) as db:
         assert db.execute("SELECT COUNT(*) FROM tunnel_inputs").fetchone() == (
-            11,
+            9,
         )
 
 

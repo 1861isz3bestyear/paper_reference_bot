@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from decimal import Decimal
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
@@ -67,6 +68,7 @@ def test_run_builds_mainnet_bot_with_isolated_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Verify run builds mainnet bot with isolated state."""
+    monkeypatch.setattr(cli, "archive_while_running", nullcontext)
     config = Mock()
     monkeypatch.setattr(PaperBotConfig, "load", Mock(return_value=config))
     monkeypatch.setattr(

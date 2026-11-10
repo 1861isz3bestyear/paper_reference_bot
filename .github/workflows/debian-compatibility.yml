@@ -60,6 +60,8 @@ jobs:
           # Re-running must reuse uv and work from outside the deployment.
           (cd /tmp && sh "$GITHUB_WORKSPACE/install/install.sh" --entity data-saver --no-start)
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Prepare independent storage environment
+        run: uv sync --locked --project storage
       - name: Test bootstrap failure paths and argument forwarding
         run: sh install/test_bootstrap.sh
       - name: Check installed CLI entry points
@@ -81,20 +83,37 @@ jobs:
         run: uv run --locked pytest -x server_bot/test_data_saver.py --cov-reset --cov=server_bot.data_saver --cov-branch --cov-fail-under=92
       # Record disjoint stages using the unchanged coverage configuration.
       # Default success() gating prevents all following test stages on failure.
+      - name: Storage unit tests
+        working-directory: storage
+        run: uv run --locked coverage run --parallel-mode -m pytest -x -m "not module and not integration and not e2e" --no-cov --junitxml=../test-results/storage-units.xml
       - name: Test application units
         working-directory: server_bot
         run: uv run --locked coverage run --parallel-mode -m pytest -x -m "not module and not contract and not integration and not e2e" --no-cov --strict-markers --junitxml=../test-results/units.xml
+      - name: Storage module tests
+        working-directory: storage
+        run: uv run --locked coverage run --parallel-mode -m pytest -x -m "module" --no-cov --junitxml=../test-results/storage-modules.xml
       - name: Test modules and contracts
         working-directory: server_bot
         run: uv run --locked coverage run --parallel-mode -m pytest -x -m "module or contract" --no-cov --strict-markers --junitxml=../test-results/modules.xml
+      - name: Storage integration tests
+        working-directory: storage
+        run: uv run --locked coverage run --parallel-mode -m pytest -x -m "integration" --no-cov --junitxml=../test-results/storage-integration.xml
       - name: Test component integration
         working-directory: server_bot
         run: uv run --locked coverage run --parallel-mode -m pytest -x -c pyproject.toml . ../install/test_application_contract.py -m integration --no-cov --strict-markers --junitxml=../test-results/integration.xml
+      - name: Storage end-to-end tests
+        working-directory: storage
+        run: uv run --locked coverage run --parallel-mode -m pytest -x -m "e2e" --no-cov --junitxml=../test-results/storage-e2e.xml
       - name: Test application end to end
         working-directory: server_bot
         run: uv run --locked coverage run --parallel-mode -m pytest -x -m e2e --no-cov --strict-markers --junitxml=../test-results/data-saver-e2e.xml
       - name: Verify combined application coverage
         working-directory: server_bot
+        run: |
+          uv run --locked coverage combine
+          uv run --locked coverage report --fail-under=92
+      - name: Verify independent storage coverage
+        working-directory: storage
         run: |
           uv run --locked coverage combine
           uv run --locked coverage report --fail-under=92

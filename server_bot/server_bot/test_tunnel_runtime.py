@@ -143,12 +143,12 @@ def test_corrupt_poll_timestamp_is_repaired(
     assert float(lock.read_text(encoding="utf-8")) == pytest.approx(1000.0)
 
 
-def test_next_minute_is_polled_without_waiting_after_slow_request(
+def test_next_five_minute_bucket_is_polled_without_waiting_after_slow_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Request latency must not add another full minute to the cadence."""
+    """Request latency must not add another full interval to the cadence."""
     path = tmp_path / "archive.sqlite"
-    clock = [120.0]
+    clock = [300.0]
     calls: list[float] = []
 
     def collect(_path: Path, _session: requests.Session) -> int:
@@ -166,6 +166,6 @@ def test_next_minute_is_polled_without_waiting_after_slow_request(
     monkeypatch.setattr(tunnel_runtime, "collect", collect)
     tunnel_runtime.poll_archive(path)
     tunnel_runtime.poll_archive(path)
-    clock[0] = 180
+    clock[0] = 600
     tunnel_runtime.poll_archive(path)
-    assert calls == [120.0, 180]
+    assert calls == [300.0, 600]

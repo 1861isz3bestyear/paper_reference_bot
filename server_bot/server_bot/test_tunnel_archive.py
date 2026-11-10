@@ -42,7 +42,7 @@ def test_collection_survives_restart_without_credentials(
     response = requests.Response()
     response.status_code = 200
     response.raw = BytesIO(b'{"result":{"raw":[1,2]},"code":"00000","data":[]}')
-    responses.extend([response] * 22)
+    responses.extend([response] * 18)
     path = tmp_path / "nested" / "archive.sqlite"
     assert collect(path, session) == 0
     assert collect(path, session) == 0
@@ -51,7 +51,7 @@ def test_collection_survives_restart_without_credentials(
             "SELECT source, requested_at, available_at, payload, error "
             "FROM tunnel_inputs ORDER BY id"
         ).fetchall()
-    expected_rows = 22
+    expected_rows = 18
     assert len(rows) == expected_rows
     assert rows[0][3] == response.text
     assert rows[0][1] <= rows[0][2]
@@ -84,7 +84,7 @@ def test_exchange_failure_keeps_body_and_continues(
     good = requests.Response()
     good.status_code = 200
     good.raw = BytesIO(b'{"result":[],"code":"00000","data":[]}')
-    responses.extend([bad, *([good] * 10)])
+    responses.extend([bad, *([good] * 8)])
     path = tmp_path / "archive.sqlite"
     assert collect(path, session, storage_mode=storage_mode) == 1
     with closing(sqlite3.connect(path)) as db:
@@ -156,16 +156,14 @@ def test_minute_collection_preserves_all_sources_and_legacy_rows(
     assert legacy == [(None, None)]
     expected_passes = 2
     assert len(groups) == expected_passes
-    assert not (any(row[2:] != (11, 11) for row in groups))
+    assert not (any(row[2:] != (9, 9) for row in groups))
     assert not any(not str(row[1]).endswith(":00+00:00") for row in groups)
     assert {row[0] for row in sources_saved} == {
         "instruments",
         "options",
         "spot",
         "depth",
-        "candles",
         "ticker",
-        "hourly_candles",
         "oi",
         "bitget_growth_24h",
         "bitget_growth_30d",
@@ -174,13 +172,14 @@ def test_minute_collection_preserves_all_sources_and_legacy_rows(
     assert not any(
         row[2] or '"preserved":[1,2,3]' not in row[1] for row in sources_saved
     )
+    assert not any("kline" in url for url, _ in requested)
     assert (
-        "https://api.bybit.com/v5/market/kline",
+        "https://api.bybit.com/v5/market/open-interest",
         {
             "category": "linear",
             "symbol": "BTCUSDT",
-            "interval": "1",
-            "limit": "1000",
+            "intervalTime": "5min",
+            "limit": "1",
         },
     ) in requested
     assert (
@@ -236,8 +235,8 @@ def test_compact_snapshots_preserve_payloads_and_deduplicate(
     assert {zlib.decompress(row[0]).decode("utf-8") for row in stored} == {
         payload,
     }
-    assert groups == [(11,), (11,)]
-    assert raw_count == [(11,)]
+    assert groups == [(9,), (9,)]
+    assert raw_count == [(9,)]
     assert all(row[1] <= row[2] for row in rows)
 
 
@@ -376,7 +375,7 @@ def test_public_failures_log_safe_diagnostics(
     monkeypatch.setattr(
         "server_bot.tunnel_archive.time", SimpleNamespace(sleep=pauses.append)
     )
-    source_count = 11
+    source_count = 9
     assert collect(tmp_path / "archive.sqlite", session) == source_count
     assert '"api_code": null' in caplog.text
     assert "sensitive text" not in caplog.text

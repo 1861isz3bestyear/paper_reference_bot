@@ -12,6 +12,9 @@ deployment/
 ├── install/
 │   ├── bot_services.py
 │   └── test_installed_services.py
+├── storage/
+│   ├── pyproject.toml
+│   └── market_storage/
 └── server_bot/
     ├── pyproject.toml
     └── uv.lock
@@ -285,10 +288,12 @@ only `paper-gex-archive.service`. No trading configuration, trading bots, SMTP
 monitor or credential files are required. The default entity selection is unchanged.
 
 This service runs `server_bot.tunnel_archive --asset BTC` and saves raw inputs to
-`../server_bot/tunnel_inputs.sqlite` every minute. It collects Deribit option
-instruments, summaries (including IV and open interest), and index prices needed
-for GEX replay, plus Bybit market inputs and public Bitget loan growth and
-loan-rate quotes. All 11 sources are public; API keys are not required.
+`../server_bot/tunnel_inputs.sqlite` with five-minute GEX, order-book, ticker
+and OI collection, plus hourly Bitget loan-growth and interest quotes. All nine
+sources are public; API keys are not required. OI uses the five-minute historical
+endpoint and candle OHLCV is excluded. Compressed storage and rolling 24-hour
+retention are the defaults. The sibling `storage/` package provides independent
+read, backup and SSH download commands; see `../storage/README.md`.
 It does not calculate GEX.
 The candle-only `data-saver` entity does not archive option-chain inputs.
 

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 import requests
 
-from server_bot.tunnel_archive import collect
+from server_bot.tunnel_archive import collect_due as collect
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE_PATH = ROOT / "tunnel_inputs.sqlite"
 LOGGER = logging.getLogger(__name__)
-POLL_SECONDS = 60
+POLL_SECONDS = 300
 
 
 def poll_archive(path: Path) -> None:
