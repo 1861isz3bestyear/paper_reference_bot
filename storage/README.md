@@ -95,3 +95,54 @@ CI gates unit, module, integration and E2E stages in that order across both the
 storage and application projects. A failing stage blocks all following test
 stages. Coverage from each stage is combined, preserving the application's 92%
 combined line/branch gate and adding an independent 92% gate for `market_storage`.
+
+## One-command dated downloads
+
+Install the standalone command on your local machine (Python 3.14 is obtained
+by uv when needed):
+
+```bash
+uv tool install --python 3.14 /absolute/path/to/paper/server_bot/storage
+```
+
+Add these settings to your local shell profile, filling in the SSH address later:
+
+```bash
+export GEX_HOST="popoviktorv@YOUR_VPS_IP"
+export GEX_REMOTE_ROOT="/home/popoviktorv/paper_reference_bot"
+export GEX_REMOTE_DATABASE="server_bot/tunnel_inputs_compact.sqlite"
+export GEX_OUTPUT_DIR="$HOME/gex-downloads"
+```
+
+Use the actual database filename from the service's `ExecStart`; the default
+without configuration is `server_bot/tunnel_inputs.sqlite`. After opening a new
+terminal, run:
+
+```bash
+gex-pull
+```
+
+Alternatively run `uv run --locked --project storage gex-pull` from the deployment
+root. Explicit `--host`, `--remote-root`, `--remote-database` and `--output-dir`
+options override environment settings. SSH must already work noninteractively.
+
+Each run retains a unique UTC-dated `.sqlite` snapshot and a lossless `.sqlite.gz`
+copy. Transfer validates database integrity, schema and payload references before
+publication. Compression is streamed and published atomically; if it fails, the
+validated SQLite copy remains and the command exits nonzero. No local snapshots
+are automatically deleted or merged. Keeping both copies requires space for both;
+the VPS also needs temporary space for an online SQLite backup. Compact payloads
+are already compressed, so gzip may offer limited additional savings.
+
+Use SQLite files for calculation; decompress archived gzip files before use.
+Storage validation does not establish that every indicator has sufficient data
+or run the GUI calculator. The storage package deliberately imports no calculator
+code. The current GUI live controls do not load these snapshots directly.
+
+For unattended downloads, schedule `gex-pull` every 12 hours with macOS launchd
+(or cron/systemd on Linux). Configure the four environment settings in the job
+itself: schedulers do not read your interactive shell profile. Use absolute paths
+for the installed executable and output directory, retain stdout/stderr logs, and
+ensure SSH keys and known hosts work in the scheduled environment. A sleeping or
+offline Mac cannot download; the VPS's default 24-hour retention can therefore
+leave gaps. Scheduling is not installed automatically.

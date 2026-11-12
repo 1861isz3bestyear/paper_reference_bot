@@ -5,6 +5,9 @@ description = "Independent durable market input storage and SSH snapshot transfe
 requires-python = ">=3.14"
 dependencies = []
 
+[project.scripts]
+gex-pull = "market_storage.download:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
