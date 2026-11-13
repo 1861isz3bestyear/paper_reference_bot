@@ -8,8 +8,10 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile
+from typing import Literal
 
-from market_storage.backup import validate
+from market_storage.merge import MergeReport, merge
+from market_storage.receipts import manifest
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -38,7 +40,9 @@ class Remote:
             msg = "Remote database must be relative to the deployment root."
             raise ValueError(msg)
 
-    def command(self) -> list[str]:
+    def command(
+        self, *, operation: Literal["export", "acknowledge"] = "export"
+    ) -> list[str]:
         """Build SSH arguments without interpolating user text into shell code.
 
         Returns:
@@ -46,7 +50,7 @@ class Remote:
 
         """
         root = PurePosixPath(self.root)
-        remote = shlex.join([
+        arguments = [
             "uv",
             "run",
             "--locked",
@@ -55,10 +59,13 @@ class Remote:
             "python",
             "-m",
             "market_storage",
-            "export",
+            operation,
             "--archive",
             str(root / self.database),
-        ])
+        ]
+        if operation == "export":
+            arguments.append("--copy-managed")
+        remote = shlex.join(arguments)
         return [
             "ssh",
             "-T",
@@ -88,13 +95,17 @@ async def _download(remote: Remote, output: int) -> None:
         raise RuntimeError(msg)
 
 
-def _publish(staging: Path, destination: Path) -> None:
-    validate(staging)
-    _ = staging.replace(destination)
+def _publish(staging: Path, destination: Path) -> MergeReport:
+    return merge(staging, destination)
 
 
-async def pull(remote: Remote, destination: Path) -> None:
-    """Replace local data only after transfer and validation succeed."""
+async def pull(remote: Remote, destination: Path) -> MergeReport:
+    """Merge a validated download without deleting local history.
+
+    Returns:
+        Deduplication counts and successful collection timeline gaps.
+
+    """
     await asyncio.to_thread(
         destination.parent.mkdir, parents=True, exist_ok=True
     )
@@ -104,6 +115,31 @@ async def pull(remote: Remote, destination: Path) -> None:
             await _download(remote, output.fileno())
             output.flush()
             os.fsync(output.fileno())
-            await asyncio.to_thread(_publish, staging, destination)
+            report = await asyncio.to_thread(_publish, staging, destination)
+            await _acknowledge(remote, staging)
+            return report
         finally:
             await asyncio.to_thread(staging.unlink, missing_ok=True)
+
+
+async def _acknowledge(remote: Remote, staging: Path) -> None:
+    content = await asyncio.to_thread(manifest, staging)
+    process = await asyncio.create_subprocess_exec(
+        *remote.command(operation="acknowledge"),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, error = await asyncio.wait_for(
+            process.communicate(content), timeout=300
+        )
+    finally:
+        if process.returncode is None:
+            process.kill()
+            _ = await process.wait()
+    if process.returncode:
+        msg = "Local merge saved, but VPS copy acknowledgement failed: " + (
+            error or b""
+        ).decode(errors="replace")
+        raise RuntimeError(msg)

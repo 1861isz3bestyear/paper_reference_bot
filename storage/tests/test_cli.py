@@ -10,6 +10,7 @@ from market_storage import __main__ as cli
 from market_storage.archive import Archive
 from market_storage.backup import validate
 from market_storage.models import Window
+from market_storage.receipts import enable_copy_retention
 from tests.conftest import STAMP
 
 if TYPE_CHECKING:
@@ -94,3 +95,33 @@ def test_pull_rejects_invalid_host_before_network(
         ],
     )
     assert cli.main() == 1
+
+
+def test_local_merge_audit_and_cleanup_cli(
+    tmp_path: Path, observation: Observation, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise offline commands through production argument parsing."""
+    source, output = tmp_path / "source.sqlite", tmp_path / "output.sqlite"
+    Archive(path=source).store(observation)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "market_storage",
+            "merge",
+            "--source",
+            str(source),
+            "--output",
+            str(output),
+        ],
+    )
+    assert cli.main() == 0
+    monkeypatch.setattr(
+        sys, "argv", ["market_storage", "check", "--archive", str(output)]
+    )
+    assert cli.main() == 0
+    enable_copy_retention(source)
+    monkeypatch.setattr(
+        sys, "argv", ["market_storage", "cleanup", "--archive", str(source)]
+    )
+    assert cli.main() == 0

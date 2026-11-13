@@ -27,9 +27,11 @@ for an alternate archive path relative to the deployment root.
 
 The remote process exports an online SQLite backup, including committed WAL
 contents. The downloader streams to a temporary local file and checks database
-integrity, schema and payload references before atomic replacement. A failure
-leaves the prior destination intact. Each pull replaces the local snapshot;
-it does not merge historical downloads or change the VPS database.
+integrity, schema and payload references before atomic replacement. Transfer or validation failure leaves the prior destination intact. Pull now
+merges into cumulative local history instead of replacing it with the VPS window.
+After durable publication it acknowledges only downloaded record fingerprints
+on the VPS. An acknowledgement failure reports failure but keeps the local copy;
+retry the same command safely. See the checked-history contract below.
 
 A standalone export, useful for other transports:
 
@@ -96,7 +98,7 @@ storage and application projects. A failing stage blocks all following test
 stages. Coverage from each stage is combined, preserving the application's 92%
 combined line/branch gate and adding an independent 92% gate for `market_storage`.
 
-## One-command dated downloads
+## One-command cumulative downloads
 
 Install the standalone command on your local machine (Python 3.14 is obtained
 by uv when needed):
@@ -126,11 +128,11 @@ Alternatively run `uv run --locked --project storage gex-pull` from the deployme
 root. Explicit `--host`, `--remote-root`, `--remote-database` and `--output-dir`
 options override environment settings. SSH must already work noninteractively.
 
-Each run retains a unique UTC-dated `.sqlite` snapshot and a lossless `.sqlite.gz`
-copy. Transfer validates database integrity, schema and payload references before
+Each run merges into `tunnel_inputs.sqlite` and refreshes its lossless
+`.sqlite.gz` copy. Transfer validates metadata and payload contents before
 publication. Compression is streamed and published atomically; if it fails, the
-validated SQLite copy remains and the command exits nonzero. No local snapshots
-are automatically deleted or merged. Keeping both copies requires space for both;
+validated SQLite copy remains and the command exits nonzero. Old dated snapshots
+remain untouched. Keeping both copies requires space for both;
 the VPS also needs temporary space for an online SQLite backup. Compact payloads
 are already compressed, so gzip may offer limited additional savings.
 
@@ -146,3 +148,103 @@ for the installed executable and output directory, retain stdout/stderr logs, an
 ensure SSH keys and known hosts work in the scheduled environment. A sleeping or
 offline Mac cannot download; the VPS's default 24-hour retention can therefore
 leave gaps. Scheduling is not installed automatically.
+
+
+## Checked cumulative history and copy receipts
+
+Deploy the updated `storage/` package to **both** the local machine and VPS.
+Restart the VPS collector after upgrading so its running Python process uses
+copy-aware pruning. This change does not deploy or restart your VPS for you.
+Before the first download, activate copied-only retention on the VPS (the online
+export performs schema/integrity validation before switching the policy):
+
+```bash
+cd /home/popoviktorv/paper_reference_bot
+export PATH="$HOME/.local/bin:$PATH"
+uv run --locked --project storage python -m market_storage export \
+  --archive server_bot/tunnel_inputs.sqlite --copy-managed > /dev/null
+systemctl --user restart paper-gex-archive.service
+```
+
+Then, on the local machine, from the directory containing `storage/`:
+
+```bash
+uv run --locked --project storage python -m market_storage pull \
+  --host popoviktorv@YOUR_VPS \
+  --remote-root /home/popoviktorv/paper_reference_bot \
+  --output downloads/tunnel_inputs.sqlite
+```
+
+`gex-pull` also uses one cumulative `tunnel_inputs.sqlite` in its output directory
+and refreshes its `.sqlite.gz` copy. Old dated downloads are not deleted or imported
+automatically. Merge each existing snapshot explicitly to recover its history:
+
+```bash
+uv run --locked --project storage python -m market_storage merge \
+  --source old-download.sqlite --output downloads/tunnel_inputs.sqlite
+uv run --locked --project storage python -m market_storage check \
+  --archive downloads/tunnel_inputs.sqlite
+```
+
+The union preserves old local observations even when absent from newer downloads.
+Identity is `(asset, source, requested_at, available_at, error)` after UTC
+normalization. Identical payloads for that identity collapse, across raw/compact
+storage and collection IDs; the first collection identity/minute is retained.
+Different payloads for the same identity reject the complete merge. Different
+receipt times remain distinct observations, including legitimate revisions.
+Failed-response records remain stored but are never successful coverage.
+
+Validation checks SQLite structure, required columns, metadata types, supported
+asset/source, timezone offsets, causal timestamps, collection identity, zlib codec,
+UTF-8, payload references and SHA256 digests. Successful bodies must parse as JSON.
+Provider-specific field validation still belongs to collectors and consumers:
+valid JSON and a correct digest cannot prove the exchange data is truthful.
+Corruption is rejected, never silently repaired or discarded. Keep the bad file
+for investigation. Unsupported legacy rows require an explicit migration.
+
+The JSON report lists unique observations, removed duplicates and per-source
+successful/missing UTC buckets (five minutes or one hour). Bounds cover each
+asset's first through last observed request, including failed requests. Entirely
+missing sources are reported within those bounds. Nothing is forward-filled,
+interpolated or deleted to hide a gap. Periods outside those bounds, and missed
+polls within an otherwise successful bucket, cannot be inferred by this audit.
+An empty archive has no inferred timeline. Gaps do not mean byte corruption and
+are reported without rejecting otherwise valid history.
+
+Local publishers use a persistent `.sqlite.lock`, a private staged union, a SQLite
+transaction, file fsync, atomic rename and parent-directory fsync. Concurrent
+imports serialize. Use the destination as a published read-only calculation
+archive, not an actively written SQLite database with WAL sidecars. Local
+history has no automatic expiry; monitor disk usage.
+
+After durable local publication, the client sends fingerprints of **only the
+received snapshot**, never a timestamp cutoff or the entire local history.
+The VPS matches exact record content and causal times and stores `copy_receipts`:
+`fingerprint`, first `copied_at` and `delete_after = copied_at + 48 hours`.
+The server clock sets these UTC times. Repeated copies keep the first deadline.
+Changed or newly collected observations are not acknowledged by an old manifest.
+A failed or corrupt download sends no acknowledgement. SSH acknowledgement
+failure leaves local history saved and remote observations unqueued for that
+attempt; retrying is safe. This is a recoverable two-step protocol, not a
+cross-machine transaction. The required copy is the SQLite archive; gzip is an
+optional derivative, so gzip failure does not undo its receipt.
+
+Once `copy_receipts` exists, `Archive.prune` ignores rolling age deletion and only
+removes acknowledged observations whose 48-hour deadline has arrived. Uncopied
+observations are retained regardless of age. Cleanup runs at the collector's
+next prune cycle, so actual deletion can occur one polling interval after the
+deadline; a stopped collector cannot guarantee a wall-clock deletion time.
+Shared payloads survive while referenced. Receipt tombstones remain for retry
+idempotency. This policy persists across collector restarts and backup restores;
+don't deploy an older collector/storage version that ignores receipts.
+
+Manual VPS cleanup (the collector already does this automatically):
+
+```bash
+uv run --locked --project storage python -m market_storage cleanup \
+  --archive server_bot/tunnel_inputs.sqlite
+```
+
+Copied-only retention deliberately grows if downloads stop. Monitor disk space
+and copy regularly; never silently discard uncopied data to satisfy a size cap.
+The first switch cannot restore records already pruned by the old 24-hour policy.

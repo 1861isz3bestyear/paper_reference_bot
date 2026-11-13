@@ -30,14 +30,12 @@ def ssh_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Execute remote commands locally at the SSH network boundary."""
     executable = tmp_path / "ssh"
     _ = executable.write_text(
-        f"#!{sys.executable}\n"
-        "import os, sys\n"
-        "mode = os.environ.get('SSH_FIXTURE_MODE', '')\n"
-        "if mode == 'fail': sys.exit(23)\n"
-        "if mode == 'corrupt':\n"
-        "    print('incomplete database')\n"
-        "    sys.exit(0)\n"
-        "os.execv('/bin/sh', ['sh', '-c', sys.argv[-1]])\n"
+        f"#!{sys.executable}\nimport os, sys\nmode ="
+        " os.environ.get('SSH_FIXTURE_MODE', '')\nif mode == 'fail':"
+        " sys.exit(23)\nif mode == 'ack-fail' and 'acknowledge' in"
+        " sys.argv[-1]: sys.exit(23)\nif mode == 'corrupt':\n   "
+        " print('incomplete database')\n    sys.exit(0)\nos.execv('/bin/sh',"
+        " ['sh', '-c', sys.argv[-1]])\n"
     )
     executable.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
@@ -87,10 +85,13 @@ def test_download_loads_only_complete_validated_backup(
 ) -> None:
     """Download a real remote CLI export and load it through the storage API."""
     destination = tmp_path / "local/archive.sqlite"
-    asyncio.run(pull(remote_archive, destination))
+    _ = asyncio.run(pull(remote_archive, destination))
     window = Window(asset="BTC", start=STAMP, end=STAMP)
     assert Archive(path=destination).load(window) == (observation,)
-    assert set(destination.parent.iterdir()) == {destination}
+    assert set(destination.parent.iterdir()) == {
+        destination,
+        destination.with_suffix(".sqlite.lock"),
+    }
 
 
 @pytest.mark.usefixtures("ssh_boundary")
@@ -109,7 +110,7 @@ def test_failed_download_preserves_existing_archive(
     with pytest.raises(
         (RuntimeError, sqlite3.DatabaseError), match=r"SSH|database"
     ):
-        asyncio.run(pull(remote_archive, destination))
+        _ = asyncio.run(pull(remote_archive, destination))
     assert destination.read_bytes() == b"previous local data"
 
 
@@ -165,3 +166,26 @@ def test_missing_compressed_payload_is_rejected(
         _ = db.execute("DELETE FROM tunnel_payloads")
     with pytest.raises(ValueError, match="missing compressed"):
         validate(path)
+
+
+@pytest.mark.usefixtures("ssh_boundary")
+def test_ack_failure_preserves_local_copy_and_remote_data(
+    tmp_path: Path, remote_archive: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never roll back durable history or queue deletion when SSH ACK fails."""
+    destination = tmp_path / "local.sqlite"
+    monkeypatch.setenv("SSH_FIXTURE_MODE", "ack-fail")
+    with pytest.raises(RuntimeError, match="acknowledgement failed"):
+        _ = asyncio.run(pull(remote_archive, destination))
+    validate(destination)
+    remote = Path(remote_archive.root) / remote_archive.database
+    with closing(sqlite3.connect(remote)) as db:
+        assert db.execute("SELECT count(*) FROM copy_receipts").fetchone() == (
+            0,
+        )
+    monkeypatch.delenv("SSH_FIXTURE_MODE")
+    _ = asyncio.run(pull(remote_archive, destination))
+    with closing(sqlite3.connect(remote)) as db:
+        assert db.execute("SELECT count(*) FROM copy_receipts").fetchone() == (
+            1,
+        )

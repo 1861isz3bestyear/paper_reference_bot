@@ -305,3 +305,16 @@ to manage this service. Uninstalling preserves the archive. For ETH, override
 If you previously pointed `paper-data-saver.service` at the tunnel archive using
 a manual override, stop and disable that service before installing `gex` to avoid
 duplicate collection. Remove that manual override before reusing the candle service.
+
+
+### Preserve copied GEX data for 48 hours before VPS cleanup
+
+The updated storage downloader maintains cumulative local history and acknowledges
+copied record fingerprints after validation and durable publication. Activate
+copy-managed retention and restart the collector after deploying the updated
+`storage/` package to the VPS; otherwise the legacy 24-hour age policy can still
+remove records. Follow the deployment commands and failure/retry contract in
+[the storage guide](../storage/README.md#checked-cumulative-history-and-copy-receipts).
+Once enabled, only copied records become eligible for cleanup 48 hours after
+their first acknowledgement. Uncopied records remain regardless of age; monitor
+disk space. The existing service override and output path must be respected.

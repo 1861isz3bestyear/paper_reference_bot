@@ -39,7 +39,7 @@ def test_dated_downloads_preserve_data(
     for _ in range(expected_snapshots):
         assert download.main() == 0
     snapshots = list(directory.glob("*.sqlite"))
-    assert len(snapshots) == expected_snapshots
+    assert len(snapshots) == 1
     for path in snapshots:
         assert Archive(path=path).load(
             Window(asset="BTC", start=STAMP, end=STAMP)

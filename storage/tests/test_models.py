@@ -53,7 +53,7 @@ def test_remote_quotes_paths_with_shell_metacharacters() -> None:
     command = remote.command()
     assert command[-2] == "user@vps"
     assert (
-        shlex.split(command[-1].split("; exec ", 1)[1])[-1]
+        shlex.split(command[-1].split("; exec ", 1)[1])[-2]
         == remote.root + "/server_bot/tunnel_inputs.sqlite"
     )
 

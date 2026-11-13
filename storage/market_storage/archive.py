@@ -1,7 +1,6 @@
 # Copyright 2026 avwap-workspace-tests contributors
 """Commit exact inputs before exposing them to calculation consumers."""
 
-import hashlib
 import sqlite3
 import zlib
 from contextlib import closing
@@ -10,7 +9,9 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
 from market_storage.models import Observation, Source, Window, aware
+from market_storage.receipts import cleanup
 from market_storage.schema import prepare
+from market_storage.writing import insert_observation
 
 DUE_QUERIES = {
     "tunnel_inputs": (
@@ -68,7 +69,7 @@ class Archive:
         with closing(sqlite3.connect(self.path, timeout=30)) as db:
             prepare(db)
             with db:
-                _insert(
+                insert_observation(
                     db,
                     observation,
                     mode=self.mode,
@@ -126,6 +127,16 @@ class Archive:
             raise ValueError(msg)
         if not self.path.exists():
             return
+        with closing(_read_connection(self.path)) as reader:
+            managed = (
+                reader.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='copy_receipts'"
+                ).fetchone()
+                is not None
+            )
+        if managed:
+            _ = cleanup(self.path, now=now)
+            return
         cutoff = (now - retention).astimezone(UTC).isoformat()
         with closing(sqlite3.connect(self.path, timeout=30)) as db:
             prepare(db)
@@ -139,50 +150,6 @@ class Archive:
                     "DELETE FROM tunnel_payloads WHERE digest NOT IN "
                     "(SELECT digest FROM tunnel_observations)"
                 )
-
-
-def _insert(
-    db: sqlite3.Connection,
-    observation: Observation,
-    *,
-    mode: Literal["raw", "compact"],
-    collection_started: datetime | None,
-) -> None:
-    requested = observation.requested.astimezone(UTC).isoformat()
-    available = observation.available.astimezone(UTC).isoformat()
-    minute = (
-        (collection_started or observation.requested)
-        .astimezone(UTC)
-        .replace(second=0, microsecond=0)
-        .isoformat()
-    )
-    identity = (
-        observation.asset,
-        observation.source.value,
-        requested,
-        available,
-    )
-    tail = (observation.error, observation.collection, minute)
-    if mode == "raw":
-        _ = db.execute(
-            """INSERT INTO tunnel_inputs
-            (asset,source,requested_at,available_at,payload,error,collection_id,
-             minute_at) VALUES (?,?,?,?,?,?,?,?)""",
-            (*identity, observation.payload, *tail),
-        )
-        return
-    encoded = observation.payload.encode("utf-8")
-    digest = hashlib.sha256(encoded).hexdigest()
-    _ = db.execute(
-        "INSERT OR IGNORE INTO tunnel_payloads VALUES (?, 'zlib', ?)",
-        (digest, zlib.compress(encoded)),
-    )
-    _ = db.execute(
-        "INSERT INTO tunnel_observations "
-        "(asset,source,requested_at,available_at,digest,error,collection_id,"
-        "minute_at) VALUES (?,?,?,?,?,?,?,?)",
-        (*identity, digest, *tail),
-    )
 
 
 def _read_connection(path: Path) -> sqlite3.Connection:

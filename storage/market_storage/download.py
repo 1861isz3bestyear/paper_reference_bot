@@ -8,10 +8,10 @@ import os
 import shutil
 import sqlite3
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
+from market_storage.merge import format_report
 from market_storage.transfer import Remote, pull
 
 
@@ -56,15 +56,15 @@ def compress_snapshot(source: Path) -> Path:
 
 
 async def download_snapshot(remote: Remote, directory: Path) -> Path:
-    """Download and validate a unique UTC snapshot, then compress a copy.
+    """Merge into the cumulative local archive, then compress a copy.
 
     Returns:
         The retained SQLite snapshot for calculator use.
 
     """
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-    destination = directory / f"tunnel_inputs-{stamp}.sqlite"
-    await pull(remote, destination)
+    destination = directory / "tunnel_inputs.sqlite"
+    report = await pull(remote, destination)
+    _ = sys.stdout.write(format_report(report) + "\n")
     _ = await asyncio.to_thread(compress_snapshot, destination)
     return destination
 
@@ -106,6 +106,7 @@ def main() -> int:
         OSError,
         sqlite3.Error,
         ValueError,
+        TypeError,
         RuntimeError,
         TimeoutError,
     ) as exc:

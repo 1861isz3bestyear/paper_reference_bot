@@ -19,7 +19,7 @@ def validate(path: Path) -> None:
     with closing(
         sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
     ) as db:
-        rows: list[tuple[str]] = db.execute("PRAGMA quick_check").fetchall()
+        rows: list[tuple[str]] = db.execute("PRAGMA integrity_check").fetchall()
         if rows != [("ok",)]:
             msg = "SQLite archive integrity check failed."
             raise ValueError(msg)
@@ -41,7 +41,11 @@ def validate(path: Path) -> None:
                 "available_at",
                 "error",
                 "collection_id",
+                "minute_at",
             }
+            required.add(
+                "digest" if table == "tunnel_observations" else "payload"
+            )
             if not required <= {row[1] for row in columns}:
                 msg = "Market archive schema is incomplete."
                 raise ValueError(msg)
