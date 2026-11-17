@@ -159,3 +159,25 @@ def test_collection_minute_preserves_individual_response_times(
     assert archive.load(
         Window(asset="BTC", start=STAMP, end=later.available)
     ) == (observation, later)
+
+
+@pytest.mark.parametrize("mode", ["raw", "compact"])
+def test_source_filtered_load(
+    tmp_path: Path, observation: Observation, mode: Literal["raw", "compact"]
+) -> None:
+    """Select independent flow sources without decoding unrelated payloads."""
+    archive = Archive(path=tmp_path / "filtered.sqlite", mode=mode)
+    archive.store(observation)
+    window = Window(
+        asset=observation.asset,
+        start=observation.requested,
+        end=observation.available,
+    )
+    assert archive.load(window, sources=frozenset((observation.source,))) == (
+        observation,
+    )
+    assert not archive.load(window, sources=frozenset())
+    others = frozenset(
+        source for source in Source if source != observation.source
+    )
+    assert not archive.load(window, sources=others)

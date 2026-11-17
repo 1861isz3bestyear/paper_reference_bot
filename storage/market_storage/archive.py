@@ -76,7 +76,9 @@ class Archive:
                     collection_started=collection_started,
                 )
 
-    def load(self, window: Window) -> tuple[Observation, ...]:
+    def load(
+        self, window: Window, *, sources: frozenset[Source] | None = None
+    ) -> tuple[Observation, ...]:
         """Read only successful observations received by the cutoff.
 
         Returns:
@@ -84,7 +86,7 @@ class Archive:
 
         """
         with closing(_read_connection(self.path)) as db:
-            rows = _read_rows(db, window)
+            rows = _read_rows(db, window, sources=sources)
         return tuple(sorted(rows, key=lambda row: row.available))
 
     def due(self, asset: str, source: Source, *, now: datetime) -> bool:
@@ -164,8 +166,13 @@ def _tables(db: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(row[0] for row in rows)
 
 
-def _read_rows(db: sqlite3.Connection, window: Window) -> list[Observation]:
+def _read_rows(
+    db: sqlite3.Connection, window: Window, *, sources: frozenset[Source] | None
+) -> list[Observation]:
     observations: list[Observation] = []
+    allowed = {
+        source.value for source in (Source if sources is None else sources)
+    }
     for table in _tables(db):
         compact = table == "tunnel_observations"
         rows: list[tuple[object, ...]] = db.execute(
@@ -178,7 +185,7 @@ def _read_rows(db: sqlite3.Connection, window: Window) -> list[Observation]:
         ).fetchall()
         for row in rows:
             # Legacy OHLCV and authenticated margin rows are never inputs.
-            if row[0] not in {source.value for source in Source}:
+            if row[0] not in allowed:
                 continue
             observations.append(_decode(row, window, compact=compact))
     return observations

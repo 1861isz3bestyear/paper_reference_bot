@@ -38,6 +38,7 @@ class Candle:
     options_stop: float = math.nan
     options_intrabar: float = 0.0
     options_insurance: float = math.nan
+    options_target_ceiling: float = math.nan
 
 
 def candle_rows(data: pd.DataFrame) -> Iterator[Candle]:
@@ -81,6 +82,7 @@ def candle_rows(data: pd.DataFrame) -> Iterator[Candle]:
         "options_stop",
         "options_intrabar",
         "options_insurance",
+        "options_target_ceiling",
     )
     for key in optional:
         columns[key] = (

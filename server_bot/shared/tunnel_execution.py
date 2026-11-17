@@ -26,6 +26,28 @@ if TYPE_CHECKING:
     from shared.strategy_data import PreparedBacktest
 
 
+def tunnel_entry_decision(row: Candle, risk: SpotRisk) -> EntryDecision | None:
+    """Freeze a negative-GEX long target below its entry-time gamma flip.
+
+    Returns:
+        An eligible entry with its target, or none if no profitable room exists.
+
+    """
+    if row.options_direction not in {-1, 1}:
+        return None
+    side = "Long" if row.options_direction == 1 else "Short"
+    target = math.nan
+    if side == "Long" and math.isfinite(row.options_target_ceiling):
+        entry = row.open * (1 + risk.slippage_bps / 10000)
+        target = row.options_target_ceiling
+        if risk.take_profit_pct > 0:
+            target = min(target, entry * (1 + risk.take_profit_pct / 100))
+        net_exit = target * (1 - risk.slippage_bps / 10000)
+        if net_exit * (1 - risk.fee_pct / 100) ** 2 <= entry:
+            return None
+    return EntryDecision(side=side, price=row.open, target=target)
+
+
 @dataclass(frozen=True, kw_only=True)
 class TunnelExecutionSettings:
     """Use standard risk settings and explicitly fund both unleveraged legs."""
@@ -33,6 +55,7 @@ class TunnelExecutionSettings:
     risk: SpotRisk
     side: AllowedSide = "Both"
     allow_reentry: bool = True
+    use_insurance: bool = True
 
 
 @dataclass(kw_only=True)
@@ -93,20 +116,28 @@ class TunnelEngine:
     def _enter(self, row: Candle) -> None:
         if self.entered and not self.settings.allow_reentry:
             return
-        if row.options_direction not in {-1, 1} or not math.isfinite(
+        if row.options_direction not in {-1, 1}:
+            return
+        if self.settings.use_insurance and not math.isfinite(
             row.options_insurance
         ):
             return
-        side = "Long" if row.options_direction == 1 else "Short"
-        if self.settings.side not in {"Both", side}:
+        decision = tunnel_entry_decision(row, self.settings.risk)
+        if decision is None or self.settings.side not in {
+            "Both",
+            decision.side,
+        }:
             return
-        capital = (self.main.cash + self.insurance.cash) / 2
+        total = self.main.cash + self.insurance.cash
+        capital = total / 2 if self.settings.use_insurance else total
         if capital <= 0 or capital < self.settings.risk.minimum_order_size:
             return
         self.main.cash = capital
-        self.insurance.cash = capital
-        self.main.open(EntryDecision(side=side, price=row.open), row.time)
-        self.trigger = row.options_insurance
+        self.insurance.cash = total - capital
+        self.main.open(decision, row.time)
+        self.trigger = (
+            row.options_insurance if self.settings.use_insurance else math.nan
+        )
         self.entered = True
 
     def _protect(
@@ -147,12 +178,12 @@ def run_tunnel_backtest(
     risk = settings.risk
     engine = TunnelEngine(
         main=SpotAccount(
-            cash=capital / 2,
+            cash=capital / 2 if settings.use_insurance else capital,
             fee_pct=risk.fee_pct,
             slippage_bps=risk.slippage_bps,
         ),
         insurance=SpotAccount(
-            cash=capital / 2,
+            cash=capital / 2 if settings.use_insurance else 0.0,
             fee_pct=risk.fee_pct,
             slippage_bps=risk.slippage_bps,
         ),

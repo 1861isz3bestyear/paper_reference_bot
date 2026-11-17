@@ -45,6 +45,7 @@ class EntryDecision:
     side: Side
     price: float
     stop: float = math.nan
+    target: float = math.nan
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -79,6 +80,7 @@ class SpotPosition:
     capital: float
     quantity: float
     stop: float = math.nan
+    target: float = math.nan
 
 
 @dataclass
@@ -376,14 +378,9 @@ def protective_exit(
     stop = position.price * (1 - direction * risk.stop_loss_pct / 100)
     if math.isfinite(position.stop):
         stop = position.stop
-    target = position.price * (1 + direction * risk.take_profit_pct / 100)
     adverse = min if position.side == "Long" else max
-    favorable = max if position.side == "Long" else min
     stop_touched = (
         row.low <= stop if position.side == "Long" else row.high >= stop
-    )
-    target_touched = (
-        row.high >= target if position.side == "Long" else row.low <= target
     )
     if (
         risk.stop_loss_pct > 0 or math.isfinite(position.stop)
@@ -392,11 +389,39 @@ def protective_exit(
             price=stop if entry_bar else adverse(stop, row.open),
             reason="Stop loss",
         )
-    if not entry_bar and risk.take_profit_pct > 0 and target_touched:
-        return ExitDecision(
-            price=favorable(target, row.open), reason="Take profit"
-        )
+    if not entry_bar:
+        return take_profit_exit(row, position, risk)
     return None
+
+
+def take_profit_exit(
+    row: Candle, position: SpotPosition, risk: SpotRisk
+) -> ExitDecision | None:
+    """Use a frozen explicit target or the ordinary percentage target.
+
+    Returns:
+        A take-profit fill, capped at an explicit target even across a gap.
+
+    """
+    explicit = math.isfinite(position.target)
+    if not explicit and risk.take_profit_pct <= 0:
+        return None
+    direction = 1 if position.side == "Long" else -1
+    target = (
+        position.target
+        if explicit
+        else position.price * (1 + direction * risk.take_profit_pct / 100)
+    )
+    touched = (
+        row.high >= target if position.side == "Long" else row.low <= target
+    )
+    if not touched:
+        return None
+    favorable = max if position.side == "Long" else min
+    return ExitDecision(
+        price=target if explicit else favorable(target, row.open),
+        reason="Take profit",
+    )
 
 
 @dataclass(kw_only=True)
@@ -417,6 +442,7 @@ class SpotAccount:
             side=decision.side,
             price=price,
             stop=decision.stop,
+            target=decision.target,
             time=timestamp,
             capital=self.cash,
             quantity=(self.cash - self.cash * self.fee_pct / 100) / price,

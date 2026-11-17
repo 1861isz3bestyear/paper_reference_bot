@@ -65,6 +65,7 @@ class BacktestOptions:
     leverage: int = 1
     slippage_bps: float = 0.0
     gex_hypothesis: GexHypothesis = GexHypothesis.REGIME
+    tunnel_use_gex: bool = True
     contract: Contract | None = None
 
 
@@ -97,6 +98,7 @@ class BacktestKeywordOptions(RequiredBacktestKeywordOptions, total=False):
     slippage_bps: float
     contract: Contract | None
     gex_hypothesis: GexHypothesis
+    tunnel_use_gex: bool
 
 
 def backtest(
@@ -152,6 +154,7 @@ def backtest(
             leverage=legacy.get("leverage", 1),
             slippage_bps=legacy.get("slippage_bps", 0.0),
             contract=legacy.get("contract"),
+            tunnel_use_gex=legacy.get("tunnel_use_gex", True),
             gex_hypothesis=legacy.get("gex_hypothesis", GexHypothesis.REGIME),
         )
     elif legacy:
@@ -218,6 +221,7 @@ def backtest(
                 ),
                 side=validate_side(options.open_position_side),
                 allow_reentry=options.allow_reentry,
+                use_insurance=False,
             ),
         )
     if options.leverage > 1:
