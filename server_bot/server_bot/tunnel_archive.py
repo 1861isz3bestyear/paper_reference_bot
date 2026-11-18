@@ -113,7 +113,8 @@ def sources(
         Source(
             name="oi",
             url=endpoints.bybit + "market/open-interest",
-            params={**market, "intervalTime": "5min", "limit": "1"},
+            # Overlap one hour so publication timing cannot skip a bucket.
+            params={**market, "intervalTime": "5min", "limit": "12"},
         ),
         *bitget_sources(asset, endpoint=endpoints.bitget),
     )

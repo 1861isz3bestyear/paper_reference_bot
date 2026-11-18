@@ -199,7 +199,7 @@ def test_minute_collection_preserves_all_sources_and_legacy_rows(
             "category": "linear",
             "symbol": "BTCUSDT",
             "intervalTime": "5min",
-            "limit": "1",
+            "limit": "12",
         },
     ) in requested
     assert (

@@ -346,8 +346,13 @@ For BTC (or `--asset ETH`), the collector uses independent UTC schedules:
 | --- | --- |
 | Deribit instrument definitions, option IV/OI summaries and index price | 5 minutes |
 | Bybit top-50 order book and current ticker price | 5 minutes |
-| Bybit latest historical OI observation (`intervalTime=5min`, `limit=1`) | 5 minutes |
+| Bybit latest 12 historical OI observations (`intervalTime=5min`, `limit=12`) | 5 minutes |
 | Bitget hourly/daily loan-growth windows and current VIP0 interest quote | 1 hour |
+
+Each OI poll overlaps the previous hour to recover samples skipped by API
+publication timing or short interruptions. Raw responses retain the actual
+receipt time; historical samples must not be treated as known before receipt.
+Interruptions longer than the overlap can still leave gaps.
 
 No candle OHLCV, exchange credentials or trading orders are involved. All nine
 sources are public. Bitget requests are spaced one second apart. `--poll-seconds`
