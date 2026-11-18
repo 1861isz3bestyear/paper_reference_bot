@@ -3,7 +3,6 @@
 
 import hashlib
 import json
-from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta, tzinfo
 from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol, override
@@ -23,7 +22,7 @@ from reference_bot.trading import LocalPosition
 from shared.reference_target import publish_target
 from shared.testing_support import ignoring_arguments
 from shared.validation import json_object, object_mapping, string
-from tests.mock_support import call_args, call_kwargs, mock_child, mock_result
+from tests.mock_support import call_args, call_kwargs, mock_child
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -458,22 +457,14 @@ def test_failed_cancellation_does_not_prevent_emergency_close(
     assert call_kwargs(mock_child(client, "market_order"))["reduce_only"]
 
 
-def test_default_demo_command_uses_replica_executor(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_demo_command_rejects_legacy_strategy(
+    tmp_path: Path,
 ) -> None:
-    """Verify default demo command uses replica executor."""
-    monkeypatch.setattr(cli, "archive_while_running", nullcontext)
+    """Reject the former replica config before creating a client or orders."""
     config_path = tmp_path / "config.json"
-    _ = config_path.write_text(config(ticker="XRP_USDT").to_json())
-    env = tmp_path / "demo.env"
-    _ = env.write_text("BYBIT_API_KEY=test\nBYBIT_API_SECRET=test\n")
-    monkeypatch.setattr(execution_state, "STATE_FILE", tmp_path / "demo.json")
-    monkeypatch.setattr(cli, "LOCK_FILE", tmp_path / "demo.lock")
-    factory = Mock()
-    monkeypatch.setattr(cli, "ReferenceReplicaBot", factory)
-    cli.run_demo_command(config_path, env, resume=True)
-    factory.assert_called_once()
-    mock_child(mock_result(factory), "run").assert_called_once_with(2)
+    _ = config_path.write_text(config().to_json())
+    with pytest.raises(ValueError, match="only Snapshot tunnel"):
+        cli.run_demo_command(config_path, tmp_path / "absent.env")
 
 
 def test_client_order_link_lookup_and_cancel(

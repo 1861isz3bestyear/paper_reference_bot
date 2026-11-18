@@ -14,10 +14,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, build_opener
 
-from shared.validation import json_object, object_list, object_mapping
+from shared.validation import json_object, object_list, object_mapping, string
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from bybit_demo_bot.tunnel_journal import PendingEntry
 
 
 def open_http(request: Request, *, timeout: float) -> object:
@@ -259,6 +261,61 @@ class BybitDemoClient:
             (row for row in rows if Decimal(str(row.get("size", 0))) > 0), None
         )
 
+    def tunnel_market_order(self, entry: PendingEntry) -> str:
+        """Submit a one-way demo entry with attached exchange SL/TP.
+
+        Returns:
+            The accepted exchange order identifier.
+
+        Raises:
+            BybitDemoError: If the acknowledgement lacks its order identity.
+
+        """
+        result = self._request(
+            "POST",
+            "/v5/order/create",
+            {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "side": entry.side,
+                "orderType": "Market",
+                "qty": format(entry.quantity, "f"),
+                "positionIdx": 0,
+                "orderLinkId": entry.link,
+                "stopLoss": format(entry.stop, "f"),
+                "takeProfit": format(entry.target, "f"),
+                "tpslMode": "Full",
+                "slOrderType": "Market",
+                "tpOrderType": "Market",
+            },
+        )
+        if not result.get("orderId"):
+            msg = "Demo entry acknowledgement has no order ID."
+            raise BybitDemoError(msg)
+        return string(result["orderId"])
+
+    def tunnel_leverage(self) -> None:
+        """Require the saved strategy's unleveraged demo exposure.
+
+        Raises:
+            BybitDemoError: If the exchange cannot set leverage to one.
+
+        """
+        try:
+            _ = self._request(
+                "POST",
+                "/v5/position/set-leverage",
+                {
+                    "category": "linear",
+                    "symbol": "BTCUSDT",
+                    "buyLeverage": "1",
+                    "sellLeverage": "1",
+                },
+            )
+        except BybitDemoError as exc:
+            if "[110043]" not in str(exc):
+                raise
+
     def market_order(
         self,
         symbol: str,
@@ -431,7 +488,7 @@ class BybitDemoClient:
         if not result.get("orderId"):
             message = "Hedge entry returned no order ID"
             raise BybitDemoError(message)
-        return str(result["orderId"])
+        return string(result["orderId"])
 
     def hedge_close(self, symbol: str, position: dict[str, object]) -> None:
         """Submit a reduce-only market close for a hedge leg."""

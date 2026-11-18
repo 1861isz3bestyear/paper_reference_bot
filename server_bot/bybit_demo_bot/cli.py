@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
+import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 from bybit_demo_bot.client import BybitDemoClient, BybitDemoError
@@ -12,16 +15,13 @@ from bybit_demo_bot.executor import BybitDemoBot as BybitDemoBot
 from bybit_demo_bot.executor import (
     ReferenceAlignedDemoBot as ReferenceAlignedDemoBot,
 )
-from bybit_demo_bot.hedge import HedgeReplicaBot
-from bybit_demo_bot.replica import ReferenceReplicaBot
 from bybit_demo_bot.state import DemoState as DemoState
-from reference_bot.config import (
-    PAPER_BOT_CONFIG_FILE,
-    PaperBotConfig,
-)
+from bybit_demo_bot.tunnel_executor import TunnelDemoBot
+from bybit_demo_bot.tunnel_journal import TunnelJournal
 from server_bot.tunnel_runtime import archive_while_running
 from shared.env import load_env, setting
-from shared.hedge_strategy import HEDGE_MODE
+from shared.paper_config import PAPER_BOT_CONFIG_FILE, PaperBotConfig
+from shared.tunnel_config import TUNNEL_MODE
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = ROOT / (
@@ -33,12 +33,21 @@ STATE_FILE = ROOT / "bybit_demo_state.json"
 LOCK_FILE = ROOT / "bybit_demo_bot.instance.lock"
 
 
+@dataclass(frozen=True, kw_only=True)
+class DemoPaths:
+    """Locate the archive and dedicated execution journal."""
+
+    archive: Path = ROOT / "tunnel_inputs.sqlite"
+    state: Path = ROOT / "bybit_demo_tunnel.sqlite"
+
+
 def run_demo_command(
     config_path: Path,
     env_path: Path,
     *,
     resume: bool = False,
     poll_seconds: int = 10,
+    paths: DemoPaths | None = None,
 ) -> None:
     """Run demo command.
 
@@ -50,7 +59,18 @@ def run_demo_command(
     if poll_seconds < 1:
         message = "poll-seconds must be positive"
         raise ValueError(message)
-    config, values = PaperBotConfig.load(config_path), load_env(env_path)
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    config = PaperBotConfig.load(config_path)
+    if config.strategy_mode != TUNNEL_MODE:
+        message = "Bybit demo supports only Snapshot tunnel configs."
+        raise ValueError(message)
+    selected = paths or DemoPaths()
+    if selected.state.exists() and not resume:
+        message = (
+            "Demo journal exists; use --resume to preserve order recovery."
+        )
+        raise RuntimeError(message)
+    values = load_env(env_path)
     client = BybitDemoClient(
         setting(values, "BYBIT_API_KEY", values.get("API_KEY")),
         setting(values, "BYBIT_API_SECRET", values.get("SECRET_API_KEY")),
@@ -61,15 +81,17 @@ def run_demo_command(
         except BlockingIOError:
             message = "Another Bybit demo bot is running"
             raise RuntimeError(message) from None
-        state = DemoState.load_or_create(resume=resume)
-
-        executor = (
-            HedgeReplicaBot
-            if config.strategy_mode == HEDGE_MODE
-            else ReferenceReplicaBot
+        journal = TunnelJournal(
+            path=selected.state,
+            fingerprint=hashlib.sha256(config.to_json().encode()).hexdigest(),
         )
         with archive_while_running():
-            executor(config, client, state).run(min(poll_seconds, 2))
+            TunnelDemoBot(
+                config=config,
+                client=client,
+                journal=journal,
+                archive=selected.archive,
+            ).run(min(poll_seconds, 2))
 
 
 class CommandArguments(argparse.Namespace):
@@ -79,6 +101,8 @@ class CommandArguments(argparse.Namespace):
     env: Path = ENV_FILE
     resume: bool = False
     poll_seconds: int = 10
+    archive: Path = DemoPaths().archive
+    state: Path = DemoPaths().state
 
 
 def parse_args() -> CommandArguments:
@@ -96,6 +120,8 @@ def parse_args() -> CommandArguments:
         "--config", type=Path, default=PAPER_BOT_CONFIG_FILE
     )
     _ = parser.add_argument("--env", type=Path, default=ENV_FILE)
+    _ = parser.add_argument("--archive", type=Path, default=DemoPaths().archive)
+    _ = parser.add_argument("--state", type=Path, default=DemoPaths().state)
     _ = parser.add_argument("--resume", action="store_true")
     _ = parser.add_argument("--poll-seconds", type=int, default=10)
     return parser.parse_args(namespace=CommandArguments())
@@ -115,6 +141,7 @@ def main() -> None:
             args.env,
             resume=args.resume,
             poll_seconds=args.poll_seconds,
+            paths=DemoPaths(archive=args.archive, state=args.state),
         )
     except (BybitDemoError, OSError, RuntimeError, ValueError) as exc:
         message = f"Error: {exc}"

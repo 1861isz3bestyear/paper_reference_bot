@@ -1,0 +1,13 @@
+[project]
+name = "snapshot-tunnel"
+version = "0.1.0"
+description = "Canonical archive-backed GEX strategy shared by paper and backtest"
+requires-python = ">=3.14"
+dependencies = ["market-storage", "numpy>=2.0.0", "pandas>=2.2.0", "requests>=2.32.0"]
+
+[tool.uv.sources]
+market-storage = { path = "../storage", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

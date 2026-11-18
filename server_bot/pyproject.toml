@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "market-storage",
+    "snapshot-tunnel",
     "numpy>=2.0.0",
     "pandas>=2.2.0",
     "requests>=2.32.0",
@@ -13,6 +14,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
+snapshot-tunnel = { path = "../snapshot_tunnel", editable = true }
 market-storage = { path = "../storage", editable = true }
 
 [dependency-groups]
@@ -39,7 +41,7 @@ markers = [
 
 [tool.coverage.run]
 branch = true
-source = ["reference_bot", "live_paper_bot", "bybit_demo_bot", "bybit_bot", "server_bot", "shared"]
+source = ["reference_bot", "live_paper_bot", "bybit_demo_bot", "bybit_bot", "server_bot", "shared", "snapshot_tunnel.candles", "snapshot_tunnel.daily_gex", "snapshot_tunnel.option_levels", "snapshot_tunnel.order_book", "snapshot_tunnel.tunnel", "snapshot_tunnel.tunnel_oscillators", "snapshot_tunnel.validation"]
 omit = ["*/test_*.py"]
 
 [tool.coverage.report]

@@ -76,99 +76,61 @@ The reference bot writes `reference_*` files. The live-paper bot writes `live_pa
 
 Neither bot submits real exchange orders. Bybit credentials are used only for the read-only fee-rate endpoint. MEXC uses public market and fee data.
 
-## Bybit demo-account executor
+## Bybit demo: Snapshot tunnel only
 
-`bybit_demo_bot` runs the same shared strategy configuration against Bybit Demo Trading at
-`https://api-demo.bybit.com`. It owns separate state and instance-lock files and follows
-the reference process through its atomic `reference_target.json` snapshot. Use API credentials created inside Bybit's Demo Trading
-environment in `bybitdemoapi.env` (Bybit Testnet keys are not compatible):
+The demo command accepts **Save paper bot config** / **Download paper bot config**
+from GUI Calculator. It rejects AVWAP, VWAP-band and hedge strategies. It runs its
+own archive-backed decisions; no reference bot or live-paper process is required.
+The canonical calculation package is `../snapshot_tunnel/`, shared directly with
+backtest. Deploy that sibling directory together with `../storage/` and this
+project before synchronizing dependencies.
 
-```bash
-cp bybitapidemo.env.example bybitdemoapi.env
-chmod 600 bybitdemoapi.env
-```
-
-Run it directly in the foreground:
+From the deployment root on the VPS:
 
 ```bash
-uv run python -m bybit_demo_bot.cli run --resume \
-  --config ./paper_bot_config.json --env ./bybitdemoapi.env
+uv sync --locked --project server_bot
+cd server_bot
+uv run --locked python -m bybit_demo_bot.cli run \
+  --config configs/my_gex_setup.json \
+  --env bybitdemoapi.env \
+  --archive tunnel_inputs.sqlite \
+  --state bybit_demo_tunnel.sqlite \
+  --resume
 ```
 
-The equivalent combined CLI command is:
+The environment file contains `BYBIT_API_KEY` and `BYBIT_API_SECRET` from a
+**Bybit demo account**. The command uses `https://api-demo.bybit.com`; it does not
+select a mainnet endpoint. Keep the archive collector running. An existing
+`server_bot.cli run-bybit-demo --config ... --resume` service also selects this
+executor, using the default archive and journal paths above. Do not start
+`server_bot.cli start` for this strategy: that command starts the older reference
+and live-paper applications.
 
-```bash
-uv run python -m server_bot.cli run-bybit-demo --resume \
-  --config ./paper_bot_config.json --env ./bybitdemoapi.env
-```
+Positive GEX uses states 1/2/3 and eligible option-level proximity. Negative GEX
+uses oscillator direction without positive-state wall restrictions. Export all
+three oscillators enabled and required votes set to 2 for a two-vote quorum.
+Enabled OI must additionally agree: book and margin cannot override absent or
+opposing OI. Missing, stale and future evidence never votes. Warmup can prevent
+entries even when the service is running correctly. Plans and option-level range
+settings use the same implementation as backtest.
 
-The paper bots and demo bot support non-reversed `Bybit REST` configurations for
-`BTC_USDT`, `XRP_USDT`, `DOGE_USDT`, `ADA_USDT`, `TRX_USDT`, `LINK_USDT`, `AVAX_USDT`,
-`DOT_USDT`, `TON_USDT`, and `NEAR_USDT`. Reference publishes its actual position,
-quantity, entry identity, configuration fingerprint, and heartbeat after each successful
-processing cycle. Demo polls at most every two seconds and copies the latest position
-with market orders. It does not calculate its own signals, allocate 90% of its balance,
-or apply an independent re-entry policy. Both services must use the same configuration.
+Execution is BTCUSDT, one-way mode, 1x. Saved initial capital bounds entry notional,
+further capped by available demo funds with a reserve. Exchange minimum size and
+price grids can reject very small saved allocations. A market entry carries
+exchange-side SL/TP; after a confirmed fill, percentage protection is recalculated
+from the actual entry while retaining any frozen negative-long gamma-flip cap.
+Live fills, fees and timing can differ from a historical simulation. The export
+contains the main BTC strategy; separate price-only child simulations are not
+orders in this demo executor.
 
-**Reference controls all normal exits, including its configured SL and VWAP-band exits.**
-Demo clears exchange SL and TP instead of creating independent stop levels from its own
-fill price. Actual fills, fee rates, funding and account percentage returns can still differ.
-Demo must have sufficient funds for the exact reference quantity; it halts rather than
-silently scaling an entry. Use a dedicated demo account/position for this executor.
-
-A saved order link identifies each submission. Demo confirms both terminal order status
-and the resulting exchange position before submitting the next action. Pending/partial
-fills block additional orders. An unresolved order after 60 seconds triggers a persistent
-halt, cancellation attempts, and emergency flattening. A missing/invalid reference,
-configuration mismatch, heartbeat older than 120 seconds, or candle cursor older than
-three intervals plus 30 seconds also halts and attempts to flatten. Initial startup while
-flat allows 120 seconds for the first snapshot. Halts remain recorded in `halted_reason`
-for the SMTP monitor; investigate outstanding orders before clearing a halt. Failed
-emergency closes are retried while the process runs. **This software failsafe cannot close
-positions while the VPS/demo process is stopped or the exchange is unreachable.**
-
-On upgrade, a matching existing position is adopted and old SL/TP removed. A mismatched
-side or quantity is closed before opening the reference target, so migration can incur
-an extra round trip. Reference close/reopen events are distinguished by entry identity,
-even if the side and quantity are unchanged. After downtime, demo reconciles the latest
-position; it does not replay historical trades. Unexpected external closures while
-reference still holds halt the replica instead of creating a repeated re-entry loop.
-
-### Upgrade or start with fresh reference accounting
-
-Update the server files first. This version requires restarting **reference as well as
-demo**, because reference now publishes the target snapshot. Keep `--resume` and the
-existing demo state so outstanding orders remain identifiable.
-
-```bash
-systemctl --user stop paper-bot-reference.service bybit-demo.service
-cd ~/paper_reference_bot/lima/server_bot
-
-# Optional: deletes reference's simulated account/history and creates a new start.
-# Omit this line to preserve reference history.
-uv run python -m reference_bot.cli reset
-
-systemctl --user start paper-bot-reference.service
-```
-
-Check `reference_target.json` exists and its `published_at` and `reference_run` are current
-before starting demo (inspect reference logs if the file has not appeared):
-
-```bash
-cat reference_target.json
-systemctl --user start bybit-demo.service
-systemctl --user status paper-bot-reference.service bybit-demo.service --no-pager -l
-journalctl --user-unit=paper-bot-reference.service --user-unit=bybit-demo.service --since "5 minutes ago" -f
-```
-
-Resetting reference does not erase Bybit's transaction history, reset its balance, or
-close exchange positions while the services are stopped. On resume, demo reconciles the
-new reference target, including closing an existing position if reference is flat. Never
-delete `bybit_demo_state.json` merely to reset accounting. No mainnet execution policy is
-changed by this replica upgrade.
-
-Use the centralized [`../install`](../install/README.md) utility for the supported user-systemd
-service; do not maintain a separate hand-written unit.
+The dedicated SQLite journal records each candle decision and order intent
+before submission. Existing journals require `--resume`; changing the configuration
+requires a separate journal and no outstanding exposure from the previous run.
+Use a dedicated demo BTC position: foreign positions and open orders block entry.
+An ambiguous order response is queried by its deterministic order link and is
+never automatically resubmitted. If the exchange cannot establish its outcome,
+execution remains paused; inspect exchange orders before intervening in the
+journal. Stop the process normally to leave exchange protection in place.
 
 ## Real-money Bybit executor
 
@@ -229,78 +191,17 @@ Existing state files without the guard conservatively consume the current signal
 on upgrade, waiting for a signal change before entering. Order submission errors
 also consume the signal because the exchange may have accepted the request.
 
-### Recovering a replica halt without resetting accounts
+## Tests
 
-Heartbeat freshness is checked using the time after reading the reference snapshot,
-not the time before the Bybit position request. Heartbeat errors include measured age,
-publish time, and check time. Halts remain persistent; healthy reference data alone does
-not clear them. Emergency cleanup refreshes the saved observed position, while preserving
-any unresolved order intent.
+The server suite exercises archive collection, legacy reference/mainnet components,
+and Snapshot tunnel demo execution. Tunnel tests cover real archive receipts,
+order intent before submission, lost acknowledgements, restart recovery,
+protection, sizing and rejection of other strategies. The calculator suite also
+covers the canonical strategy package and the production UI in Chromium.
 
-After installing the fix, leave reference running and stop only demo:
-
-```bash
-systemctl --user stop bybit-demo.service
-cd ~/paper_reference_bot/lima/server_bot
-uv run python -m bybit_demo_bot.recover
-```
-
-Recovery takes demo's instance lock, checks that the exchange position is flat and there
-are no open orders for its symbol, verifies any recorded order is terminal, and validates
-a fresh matching reference snapshot. It refuses unresolved legacy entries. Only after
-all checks succeed does it back up the state and clear the halt and obsolete position
-identity. It neither submits nor cancels orders and does not reset either account's history.
-Use `--config` and `--env` if the service uses nondefault paths. If a check fails, the saved
-halt is retained; resolve the reported condition rather than deleting the state file.
-
-After a successful recovery:
-
-```bash
-systemctl --user start bybit-demo.service
-journalctl --user-unit=bybit-demo.service --since "5 minutes ago" -f
-```
-
-Demo then follows the current reference target; it does not replay trades missed while halted.
-
-### September 2026 calculation and heartbeat corrections
-
-The shared strategy now uses prior-candle bands and requires an actual traded
-entry price, handles opening gaps at exits, charges adverse entry-candle stops,
-and includes both fees in short P&L. Calculator and server strategy sources are
-kept identical. See the calculator's `REALISM_AND_TESTING.md` for assumptions;
-latest reference fills and Bybit market fills still differ from intrabar backtest
-fills. The calculator now selects Bybit linear perpetual data rather than spot.
-
-Reference and live-paper history validation explicitly converts pandas timestamps
-to nanoseconds before computing epoch milliseconds. This avoids rejecting complete
-history when pandas stores timestamps in microseconds or milliseconds. Genuine
-candle gaps still prevent cursor advancement and target publication.
-
-A saved reference halt now reports whether the **current** reference is healthy.
-Repeated unchanged flat-halt messages are limited to once per minute; exchange
-reconciliation continues every poll. Healthy data does not automatically clear
-an uncertain order or a persisted halt: use the checked recovery procedure above.
-
-Update reference and executor together. The target configuration fingerprint now
-includes the revised execution model, so an old-engine snapshot is rejected even
-when the JSON configuration matches. Do not delete account/history files to clear
-a halt. This code change does not repair old trade records or prove the cause of
-the September 15 VPS interruption without the reference journal.
-
-Validation: `uv run pytest` passes 315 tests, including timestamp resolutions
-(ns/us/ms), genuine gaps, stale/healthy diagnostic transitions, checked recovery,
-old-engine snapshot rejection, and throttled logging without reduced polling.
-
-The default suite also includes local HTTP protocol tests and full reference-to-demo
-workflows using real SQLite caches, ledger files, target publication, and demo state.
-They cover restart idempotence, delayed fills, accepted orders with lost responses,
-history failures, stale halts, checked recovery, and concurrent target reads.
-See [workspace testing instructions](../../../../TESTING.md) for the root-level
-`pytest` command and test-level selection.
-
-The calculator and server `shared/` directories are identical. Both default pytest
-suites verify their filenames and file contents byte-for-byte, ignoring generated
-cache files. Apply shared changes to both projects together.
+The calculator and server `shared/` compatibility directories remain identical.
+Their parity tests compare source bytes; the strategy implementation is owned by
+`../snapshot_tunnel/` and imported by both applications.
 
 ## VWAP zero hedge
 

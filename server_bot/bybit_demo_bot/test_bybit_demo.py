@@ -24,6 +24,8 @@ from bybit_demo_bot import client as client_module
 from bybit_demo_bot import state as execution_state
 from bybit_demo_bot.cli import BybitDemoBot, DemoState
 from bybit_demo_bot.client import BybitDemoClient, BybitDemoError
+from bybit_demo_bot.test_tunnel_demo import tunnel_config
+from bybit_demo_bot.tunnel_executor import TunnelDemoBot
 from reference_bot.config import PaperBotConfig
 from shared.testing_support import ignoring_arguments
 from shared.validation import json_object
@@ -729,7 +731,7 @@ def test_run_demo_wires_env_config_and_lock(
     """Verify run demo wires env config and lock."""
     monkeypatch.setattr(cli, "archive_while_running", nullcontext)
     config_path = tmp_path / "config.json"
-    _ = config_path.write_text(config().to_json(), encoding="utf-8")
+    _ = config_path.write_text(tunnel_config().to_json(), encoding="utf-8")
     env_path = tmp_path / "bybitapi.env"
     _ = env_path.write_text(
         "BYBIT_API_KEY=k\nBYBIT_API_SECRET=s\n", encoding="utf-8"
@@ -737,8 +739,13 @@ def test_run_demo_wires_env_config_and_lock(
     monkeypatch.setattr(cli, "LOCK_FILE", tmp_path / "lock")
     monkeypatch.setattr(execution_state, "STATE_FILE", tmp_path / "state.json")
     run = Mock()
-    monkeypatch.setattr(cli.BybitDemoBot, "run", run)
-    cli.run_demo_command(config_path, env_path, poll_seconds=3)
+    monkeypatch.setattr(TunnelDemoBot, "run", run)
+    cli.run_demo_command(
+        config_path,
+        env_path,
+        poll_seconds=3,
+        paths=cli.DemoPaths(state=tmp_path / "tunnel.sqlite"),
+    )
     run.assert_called_once_with(2)
     with pytest.raises(ValueError, match="positive"):
         cli.run_demo_command(config_path, env_path, poll_seconds=0)
@@ -759,7 +766,7 @@ def test_demo_default_env_name_and_credentials_are_wired_without_network(
     monkeypatch.setattr(cli, "archive_while_running", nullcontext)
     assert cli.ENV_FILE.name in {"bybitdemoapi.env", "bybitapidemo.env"}
     config_path = tmp_path / "config.json"
-    _ = config_path.write_text(config().to_json(), encoding="utf-8")
+    _ = config_path.write_text(tunnel_config().to_json(), encoding="utf-8")
     env_path = tmp_path / "bybitapidemo.env"
     _ = env_path.write_text(
         f"# demo only\n{key_name}='demo-key'\n{secret_name}=demo-secret\n",
@@ -769,8 +776,12 @@ def test_demo_default_env_name_and_credentials_are_wired_without_network(
     monkeypatch.setattr(execution_state, "STATE_FILE", tmp_path / "state.json")
     client_factory = Mock(return_value=Mock())
     monkeypatch.setattr(cli, "BybitDemoClient", client_factory)
-    monkeypatch.setattr(cli.BybitDemoBot, "run", Mock())
-    cli.run_demo_command(config_path, env_path)
+    monkeypatch.setattr(TunnelDemoBot, "run", Mock())
+    cli.run_demo_command(
+        config_path,
+        env_path,
+        paths=cli.DemoPaths(state=tmp_path / "tunnel.sqlite"),
+    )
     client_factory.assert_called_once_with("demo-key", "demo-secret")
 
 
@@ -791,12 +802,16 @@ def test_demo_rejects_missing_or_blank_credentials(
 ) -> None:
     """Verify demo rejects missing or blank credentials."""
     config_path = tmp_path / "config.json"
-    _ = config_path.write_text(config().to_json(), encoding="utf-8")
+    _ = config_path.write_text(tunnel_config().to_json(), encoding="utf-8")
     env_path = tmp_path / "bybitapidemo.env"
     _ = env_path.write_text(contents, encoding="utf-8")
     monkeypatch.setattr(cli, "LOCK_FILE", tmp_path / "lock")
     with pytest.raises(ValueError, match=message):
-        cli.run_demo_command(config_path, env_path)
+        cli.run_demo_command(
+            config_path,
+            env_path,
+            paths=cli.DemoPaths(state=tmp_path / "tunnel.sqlite"),
+        )
 
 
 def test_client_missing_ticker_position_and_order_id(
