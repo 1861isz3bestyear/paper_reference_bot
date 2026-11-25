@@ -41,6 +41,11 @@
     "votes": 1,
     "long_threshold": 60.0,
     "short_threshold": 40.0,
-    "maximum_age": 600.0
+    "maximum_age": 600.0,
+    "retest": {
+      "lookback": 48,
+      "interval": "5m",
+      "mode": "reversal"
+    }
   }
 }
