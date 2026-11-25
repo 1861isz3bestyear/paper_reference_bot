@@ -255,6 +255,7 @@ class TunnelDemoBot:
                 requests.RequestException,
                 RuntimeError,
                 ValueError,
+                TypeError,
                 OSError,
                 sqlite3.Error,
                 KeyError,

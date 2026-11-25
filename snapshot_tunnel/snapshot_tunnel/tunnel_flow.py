@@ -34,6 +34,7 @@ from snapshot_tunnel.tunnel_oscillators import (
 )
 
 _HOURLY_OI = timedelta(hours=1)
+BOTH_DIRECTIONS = 2
 
 if TYPE_CHECKING:
     from snapshot_tunnel.options_model import Snapshot
@@ -47,6 +48,7 @@ class OscillatorObservation:
     direction: int
     calculatable: bool = True
     momentum: float | None = None
+    valid_for: timedelta | None = None
 
 
 def fresh_observation(
@@ -65,7 +67,12 @@ def fresh_observation(
     if index < 0:
         return None
     point = stream[index]
-    if not point.calculatable or now - point.available > maximum_age:
+    age = now - point.available
+    if (
+        not point.calculatable
+        or age > maximum_age
+        or (point.valid_for is not None and age >= point.valid_for)
+    ):
         return None
     return point
 
@@ -90,6 +97,7 @@ class TunnelFlow:
     oi_convergence: tuple[OscillatorObservation, ...] = ()
 
     oi_momentum: tuple[OscillatorObservation, ...] = ()
+    retest: tuple[OscillatorObservation, ...] = ()
 
     def oi_stream(
         self, mode: OiConfirmationMode
@@ -123,6 +131,7 @@ class TunnelFlow:
                 settings.use_oi,
                 self.oi_stream(settings.oi_mode),
             ),
+            (settings.retest is not None, self.retest),
         ):
             if not enabled:
                 continue
@@ -222,6 +231,11 @@ class TunnelFlow:
 
         """
         streams = (
+            (
+                "retest",
+                settings.retest is not None,
+                TunnelFlow(retest=self.retest),
+            ),
             ("book", settings.use_book, TunnelFlow(book=self.book)),
             ("margin", settings.use_margin, TunnelFlow(margin=self.margin)),
             (
@@ -264,7 +278,16 @@ class TunnelFlow:
         observations = self.available(now, settings=settings)
         long = sum(point.direction == 1 for point in observations)
         short = sum(point.direction == -1 for point in observations)
-        required = max(1, settings.votes)
+        either = sum(
+            point.direction == BOTH_DIRECTIONS for point in observations
+        )
+        required = max(1, settings.votes) - either
+        if (
+            either
+            and (long == 0) != (short == 0)
+            and max(long, short) >= required
+        ):
+            return 1 if long else -1
         if (long >= required) == (short >= required):
             return 0
         return 1 if long >= required else -1
@@ -280,6 +303,7 @@ class TunnelFlow:
         """
         return sum(
             point.direction == direction
+            or (direction != 0 and point.direction == BOTH_DIRECTIONS)
             or (
                 direction != 0
                 and point.momentum is not None

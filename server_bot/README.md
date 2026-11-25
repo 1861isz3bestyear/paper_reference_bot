@@ -114,6 +114,22 @@ opposing OI. Missing, stale and future evidence never votes. Warmup can prevent
 entries even when the service is running correctly. Plans and option-level range
 settings use the same implementation as backtest.
 
+Retest is available in the same demo service. Enable it in Backtest before
+exporting, or add this object inside the existing `tunnel` JSON object:
+
+```json
+"retest": {"lookback": 48, "interval": "5m", "mode": "reversal"}
+```
+
+Supported intervals are `1m` and `5m`. Modes are `reversal`, `breakout`, and
+`either`. Retest contributes one confirmation toward `tunnel.votes`; enabled
+OI still has to agree when GEX is enabled. The VPS reads BTCUSDT spot klines
+from the public `https://api.bybit.com/v5/market/kline` endpoint. No additional
+API key is needed. Orders continue through the private Bybit Demo endpoint.
+A Retest-only configuration can decide from spot klines without an options
+archive when GEX, book, margin and OI are all disabled.
+Deploy the updated `snapshot_tunnel` and `server_bot` packages together.
+
 Execution is BTCUSDT, one-way mode, 1x. Saved initial capital bounds entry notional,
 further capped by available demo funds with a reserve. Exchange minimum size and
 price grids can reject very small saved allocations. A market entry carries

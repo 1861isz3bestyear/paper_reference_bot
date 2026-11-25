@@ -8,14 +8,17 @@ import signal
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import pytest
+import requests
 from market_storage.archive import Archive
 from market_storage.models import Observation, Source
+from snapshot_tunnel.tunnel import RetestSettings
 
-from bybit_demo_bot import cli, tunnel_executor
+from bybit_demo_bot import cli, tunnel_executor, tunnel_signals
 from bybit_demo_bot.client import BybitDemoClient, BybitDemoError
 from bybit_demo_bot.tunnel_executor import TunnelDemoBot
 from bybit_demo_bot.tunnel_journal import TunnelJournal, pending_entry
@@ -275,12 +278,16 @@ def test_pending_validation_and_grid_protection(bot: TunnelDemoBot) -> None:
         _ = pending_entry(json.dumps(values))
 
 
+@pytest.mark.parametrize("retest", [False, True])
 def test_real_archive_decision_uses_recorded_negative_gex_and_receipts(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    retest: bool,
 ) -> None:
     """Run the real archive adapter and shared strategy without GUI imports."""
     archive = Archive(path=tmp_path / "inputs.sqlite")
-    now = datetime.now(UTC)
+    now = NOW
     instrument = "BTC-TEST-P"
     payloads: dict[Source, object] = {
         Source.INSTRUMENTS: {
@@ -326,7 +333,18 @@ def test_real_archive_decision_uses_recorded_negative_gex_and_receipts(
                 collection="test",
             )
         )
-    config = replace(tunnel_config(), tunnel=TunnelSettings(use_book=True))
+    if retest:
+        _mock_retest_spot(monkeypatch)
+    config = replace(
+        tunnel_config(),
+        tunnel=TunnelSettings(
+            use_book=not retest,
+            retest=RetestSettings(lookback=1) if retest else None,
+        ),
+    )
+    config_path = tmp_path / "demo.json"
+    _ = config_path.write_text(config.to_json(), encoding="utf-8")
+    config = PaperBotConfig.load(config_path)
     before = archive_decision(archive.path, now, price=100000, config=config)
     after = archive_decision(
         archive.path, now + timedelta(seconds=2), price=100000, config=config
@@ -339,6 +357,58 @@ def test_real_archive_decision_uses_recorded_negative_gex_and_receipts(
         archive.path, now + timedelta(hours=1), price=100000, config=config
     )
     assert stale.direction == 0
+
+
+def test_demo_retest_only_uses_public_spot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Retest-only decision can run before any options data is archived."""
+    _mock_retest_spot(monkeypatch)
+    config = replace(
+        tunnel_config(),
+        tunnel=TunnelSettings(
+            use_gex=False, use_book=False, retest=RetestSettings(lookback=1)
+        ),
+    )
+    archive = tmp_path / "missing.sqlite"
+    decision = archive_decision(archive, NOW, price=100, config=config)
+    assert (decision.direction, decision.votes) == (1, 1)
+    expired = archive_decision(
+        archive, NOW + timedelta(minutes=5), price=100, config=config
+    )
+    assert (expired.direction, expired.votes) == (0, 0)
+
+
+def _mock_retest_spot(monkeypatch: pytest.MonkeyPatch) -> None:
+    def get(
+        url: str, *, params: dict[str, str | int], timeout: int
+    ) -> SimpleNamespace:
+        assert url == "https://api.bybit.com/v5/market/kline"
+        assert params["category"] == "spot"
+        assert params["symbol"] == "BTCUSDT"
+        assert timeout > 0
+        hourly = params["interval"] == "60"
+        stamp = NOW - timedelta(hours=int(hourly))
+        opening = 100 if hourly else 90
+        rows = [[
+            str(int(stamp.timestamp() * 1000)),
+            str(opening),
+            "110",
+            "90",
+            "100",
+            "1",
+            "100",
+        ]]
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {"retCode": 0, "result": {"list": rows}},
+        )
+
+    session = requests.Session()
+    monkeypatch.setattr(session, "get", get)
+    monkeypatch.setattr(
+        tunnel_signals, "requests", SimpleNamespace(Session=lambda: session)
+    )
 
 
 @pytest.mark.parametrize("limit", ["capital", "maximum", "grid"])

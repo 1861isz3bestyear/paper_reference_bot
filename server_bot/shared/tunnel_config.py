@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import asdict
 from datetime import timedelta
 
+from snapshot_tunnel.tunnel import RetestMode, RetestSettings
+
 from shared.option_levels import OptionLevelRange
 from shared.tunnel import OiConfirmationMode, TunnelSettings, TunnelState
 from shared.validation import boolean, integer, number, object_mapping, string
@@ -21,6 +23,8 @@ def tunnel_values(settings: TunnelSettings) -> dict[str, object]:
 
     """
     values: dict[str, object] = asdict(settings)
+    if settings.retest is None:
+        _ = values.pop("retest")
     values["maximum_age"] = settings.maximum_age.total_seconds()
     return values
 
@@ -37,7 +41,7 @@ def parse_tunnel(value: object) -> TunnelSettings:
     """
     values = object_mapping(value)
     defaults = tunnel_values(TunnelSettings())
-    if values.keys() - defaults.keys():
+    if values.keys() - (defaults.keys() | {"retest"}):
         msg = "Unknown snapshot tunnel configuration fields."
         raise ValueError(msg)
     if values.get("use_margin") is True and "margin_source" not in values:
@@ -71,8 +75,27 @@ def parse_tunnel(value: object) -> TunnelSettings:
         use_oi=boolean(defaults["use_oi"]),
         oi_mode=OiConfirmationMode(string(defaults["oi_mode"])),
         oi_momentum_minimum=number(defaults["oi_momentum_minimum"]),
+        retest=_parse_retest(defaults.get("retest")),
         votes=integer(defaults["votes"]),
         long_threshold=number(defaults["long_threshold"]),
         short_threshold=number(defaults["short_threshold"]),
         maximum_age=timedelta(seconds=number(defaults["maximum_age"])),
+    )
+
+
+def _parse_retest(value: object) -> RetestSettings | None:
+    if value is None:
+        return None
+    fields = object_mapping(value)
+    if fields.keys() - {"lookback", "interval", "mode"}:
+        msg = "Unknown Retest configuration fields."
+        raise ValueError(msg)
+    interval = string(fields.get("interval", "5m"))
+    if interval not in {"1m", "5m"}:
+        msg = "Retest interval must be 1m or 5m."
+        raise ValueError(msg)
+    return RetestSettings(
+        lookback=integer(fields.get("lookback", 48)),
+        interval="1m" if interval == "1m" else "5m",
+        mode=RetestMode(string(fields.get("mode", "reversal"))),
     )

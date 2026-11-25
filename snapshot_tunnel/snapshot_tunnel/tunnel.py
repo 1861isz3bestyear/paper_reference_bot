@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 _MINUTE = timedelta(minutes=1)
 
 OSCILLATOR_MAXIMUM = 100
+RETEST_LOOKBACK_MAXIMUM = 500
 
 
 class TunnelState(IntEnum):
@@ -35,6 +36,34 @@ class OiConfirmationMode(StrEnum):
     DIVERGENCE = "divergence"
     CONVERGENCE = "convergence"
     MOMENTUM = "momentum"
+
+
+class RetestMode(StrEnum):
+    """Map a spot level touch to an entry confirmation."""
+
+    EITHER = "either"
+    REVERSAL = "reversal"
+    BREAKOUT = "breakout"
+
+
+@dataclass(frozen=True, kw_only=True)
+class RetestSettings:
+    """Configure completed hourly levels and spot opening quote cadence."""
+
+    lookback: int = 48
+    interval: Literal["1m", "5m"] = "5m"
+    mode: RetestMode = RetestMode.REVERSAL
+
+    def __post_init__(self) -> None:
+        """Require a supported hourly lookback.
+
+        Raises:
+            ValueError: If the lookback is outside the supported range.
+
+        """
+        if not 1 <= self.lookback <= RETEST_LOOKBACK_MAXIMUM:
+            msg = "Retest lookback must be between 1 and 500 hours."
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -59,6 +88,7 @@ class TunnelSettings:
     long_threshold: float = 60
     short_threshold: float = 40
     maximum_age: timedelta = timedelta(minutes=10)
+    retest: RetestSettings | None = None
 
     def __post_init__(self) -> None:
         """Reject invalid price distances and impossible confirmation counts.
@@ -73,20 +103,14 @@ class TunnelSettings:
         ):
             msg = "OI momentum minimum must be finite and positive."
             raise ValueError(msg)
-        distances = (
-            self.tight_width,
-            self.proximity,
-            self.insurance_offset,
-            self.negative_long_tp_offset,
-        )
-        if any(
-            not math.isfinite(value) or not 0 < value < 1 for value in distances
-        ):
-            msg = "Tunnel distances must be finite and between zero and one."
-            raise ValueError(msg)
-        if self.votes < 1 and any(
-            (self.use_book, self.use_margin, self.use_oi)
-        ):
+        self._validate_distances()
+        enabled = sum((
+            self.use_book,
+            self.use_margin,
+            self.use_oi,
+            self.retest is not None,
+        ))
+        if self.votes < 1 and enabled:
             msg = "Trading requires at least one confirmation."
             raise ValueError(msg)
         if self.state_override is not None and self.state_override not in {
@@ -96,11 +120,7 @@ class TunnelSettings:
         }:
             msg = "Positive GEX state override must be state 1, 2 or 3."
             raise ValueError(msg)
-        if (
-            not 0
-            <= self.votes
-            <= sum((self.use_book, self.use_margin, self.use_oi))
-        ):
+        if not 0 <= self.votes <= enabled:
             msg = "Required confirmations must fit the enabled oscillators."
             raise ValueError(msg)
         if (
@@ -113,6 +133,19 @@ class TunnelSettings:
             raise ValueError(msg)
         if self.maximum_age <= timedelta(0):
             msg = "Oscillator maximum age must be positive."
+            raise ValueError(msg)
+
+    def _validate_distances(self) -> None:
+        distances = (
+            self.tight_width,
+            self.proximity,
+            self.insurance_offset,
+            self.negative_long_tp_offset,
+        )
+        if any(
+            not math.isfinite(value) or not 0 < value < 1 for value in distances
+        ):
+            msg = "Tunnel distances must be finite and between zero and one."
             raise ValueError(msg)
 
     def for_gex(self, gex: float | None) -> TunnelSettings:
